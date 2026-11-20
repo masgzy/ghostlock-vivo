@@ -32,7 +32,9 @@ pub fn decompress_lz4_legacy(payload: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn decompress_lz4_legacy_frame(payload: &[u8]) -> Result<Vec<u8>> {
+/// Raw LZ4-legacy frame decoder: the arm64-Image sanity check is the caller's
+/// business (the vendor_ramdisk decoder must NOT reject non-Image output).
+pub fn decompress_lz4_legacy_frame(payload: &[u8]) -> Result<Vec<u8>> {
     const MAX_BLOCK: usize = 8 * 1024 * 1024;
     if payload.len() <= 8 || &payload[..4] != LZ4_LEGACY_MAGIC {
         return Err(ExtractError::new("LZ4 kernel payload too short"));

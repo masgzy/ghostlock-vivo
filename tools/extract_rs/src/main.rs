@@ -10,7 +10,8 @@ use ghostlock_extract::boot::{BootImage, MTK_DEFAULT_PHYS_LOAD, MTK_VADDR_BASE};
 use ghostlock_extract::btf::Btf;
 use ghostlock_extract::derive::{
     PSELECT_ROUTE_NFDS, derive_cred_5x, derive_nf_logger_registration, derive_pselect_layout,
-    ensure_rtmutex_43499_unpatched, multicast_waiter_off, relative_symbols,
+    derive_sys_exit_tp_funcs, ensure_rtmutex_43499_unpatched, multicast_waiter_off,
+    relative_symbols,
 };
 use ghostlock_extract::error::{ExtractError, Result};
 use ghostlock_extract::fdt::{recover_kernel_phys_load, recover_kernel_phys_load_from_uefi};
@@ -56,8 +57,9 @@ struct Cli {
     /// kernel physical load address (hex or decimal); overrides defaults
     #[arg(long, value_parser = parse_int)]
     phys: Option<u64>,
-    /// output format: text (JSON), json, or conf (flattened GLK profile HOCON)
-    #[arg(long, value_parser = ["text", "json", "conf"], default_value = "text")]
+    /// output format: text (JSON), json, conf (flattened GLK profile
+    /// HOCON), or ic-syms (CVE-2026-98260 TimerRoot symbol table)
+    #[arg(long, value_parser = ["text", "json", "conf", "ic-syms"], default_value = "text")]
     format: String,
     /// route written to --format conf; defaults to the analysis suggestion
     #[arg(long, value_parser = ["tcp_zerocopy", "select_stack", "multicast_waiter"])]
@@ -537,6 +539,64 @@ fn run(cli: &Cli) -> Result<i32> {
     }
     let struct_offsets = resolve_structs(btf.as_ref());
 
+    // vr.ko guard target. The tracepoint struct is a data symbol: GKI builds
+    // with KALLSYMS_ALL carry it, stripped/vendor kernels may not — then the
+    // disassembly derivation recovers it from __traceiter_sys_exit's code
+    // (adrp+ldr+cbz signature, cross-checked against BTF and the adjacent
+    // sys_enter struct). Ported from DONGDERS/Ghostlock-vr.
+    if symbol_offsets.get("off_vr_sys_exit_tp").copied().flatten().is_none() && !cli.no_disasm {
+        match derive_sys_exit_tp_funcs(&boot.kernel, &rel_symbols, &sorted_offsets, btf.as_ref()) {
+            Ok(field) => {
+                let funcs_off = u64::from(
+                    btf.as_ref()
+                        .and_then(|b| b.field("tracepoint", "funcs"))
+                        .unwrap_or(0x48),
+                );
+                if let Some(tp) = field.checked_sub(funcs_off) {
+                    symbol_offsets.insert("off_vr_sys_exit_tp".to_string(), Some(tp));
+                    eprintln!(
+                        "info: vr_sys_exit_tp={tp:#x} (disassembly derivation; kallsyms lacked the symbol)"
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: vr_sys_exit_tp unavailable (kallsyms + disassembly both failed): {err}; the vr guard stays off for this image"
+                );
+            }
+        }
+    }
+
+    // vendor_boot vr.ko probe (hmascs PR #257): recover the per-task tag
+    // offsets the module's de-tag code reads, so W2b does not have to rely
+    // on the hardcoded family defaults.
+    if let Some(vb) = &cli.vendor_boot {
+        match std::fs::read(vb)
+            .map_err(|err| ExtractError::new(format!("cannot read {}: {err}", vb.display())))
+            .and_then(|data| ghostlock_extract::vendor_boot::probe_vrko(&data))
+        {
+            Ok(probe) => {
+                eprintln!(
+                    "info: vendor_boot vr.ko `{}` tag_a={} tag_b={}",
+                    probe.module_path, probe.tag_a_offset, probe.tag_b_offset
+                );
+                symbol_offsets.insert(
+                    "off_vr_tag_a".to_string(),
+                    Some(u64::from(probe.tag_a_offset)),
+                );
+                symbol_offsets.insert(
+                    "off_vr_tag_b".to_string(),
+                    Some(u64::from(probe.tag_b_offset)),
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: vendor_boot vr.ko probe failed: {err}; the per-task tag clear keeps its family defaults"
+                );
+            }
+        }
+    }
+
     let missing: Vec<String> = symbol_offsets
         .iter()
         .filter(|(_, value)| value.is_none())
@@ -598,7 +658,25 @@ fn run(cli: &Cli) -> Result<i32> {
     }
 
     let btf_size = btf_raw.as_ref().map(|b| b.len()).unwrap_or(0);
-    let output = if cli.format == "conf" {
+    // CVE-2026-98260 (TimerRoot) symbol table: the t98260 exploit consumes
+    // absolute link-time kallsyms addresses (the raw kallsyms view, NOT the
+    // rebased one), so `symbols` is consulted directly.
+    let output = if cli.format == "ic-syms" {
+        let release_text = release
+            .as_deref()
+            .ok_or_else(|| ExtractError::new("--format ic-syms requires a kernel release string"))?;
+        let symbols_view = symbols.clone();
+        let mut warnings: Vec<String> = Vec::new();
+        let mut warn = |msg: &str| {
+            eprintln!("warning: {msg}");
+            warnings.push(msg.to_string());
+        };
+        let text = report::render_ic_syms(release_text, move |name| {
+            kallsyms::unique(&symbols_view, name)
+        }, &mut warn)?;
+        let _ = warnings;
+        text
+    } else if cli.format == "conf" {
         let release_text = release
             .as_deref()
             .ok_or_else(|| ExtractError::new("--format conf requires a kernel release string"))?;
@@ -725,6 +803,7 @@ fn run(cli: &Cli) -> Result<i32> {
         let extra_offsets = report::ConfExtraOffsets {
             empty_zero_page: kallsyms::unique(&symbols, "empty_zero_page")
                 .and_then(|value| value.checked_sub(base)),
+            vr_tracepoint_funcs: btf.as_ref().and_then(|b| b.field("tracepoint", "funcs")),
         };
         report::render_conf(&report::ConfInputs {
             release: release_text,
