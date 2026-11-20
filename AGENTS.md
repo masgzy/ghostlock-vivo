@@ -123,7 +123,7 @@ python3 tools/cmp_disasm.py <baseline-binary> build/native/ghostlock
   Diátaxis、DITA、Minimalism、Google style）。
 - **结构与流程变化必须同步更新对应 Mermaid/UML 图**：L 级改动（route、跨层契约、会话/资源所有权、
   攻击阶段机、清理边界）必须画图；一个结构只保留一处权威图，其他文档链接它。
-- 双语：`README.md` + `README_ZH.md`；`docs/**` 下有 `*_ZH.md` 对应的保持同步。
+- 双语：`README.md`（中文，主入口）+ `README_EN.md`（英文）；`docs/**` 下有 `*_ZH.md` 对应的保持同步。
 - 现行文档：`README.md`、`docs/kernel_profiles/*`、`docs/development/adding-a-component.md`、
   `docs/development/design-philosophy.md`（设计思想，改动前必读）、
   `docs/development/engineering-standards.md`（工程规范，做法与门槛）、

@@ -84,6 +84,13 @@ jobs:
           make -C src ghostlock
           "${{ runner.temp }}/ondk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-all build/native/ghostlock || true
 
+      - name: Unit tests
+        run: |
+          export ONDK_HOME="${{ runner.temp }}/ondk"
+          export ANDROID_NDK_HOME="$ONDK_HOME"
+          export NDK_ROOT="$ONDK_HOME"
+          ./gradlew :profile-core:test :app:testDebugUnitTest --no-daemon
+
       - name: Build Release APK
         run: |
           export ONDK_HOME="${{ runner.temp }}/ondk"
