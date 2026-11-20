@@ -188,6 +188,9 @@ addresses into runtime addresses.
 | `kernel_phys_load` | Kernel physical load address (0 falls back to the SoC formula) |
 | `kernel_phys_offset` | DRAM base / linear-map `PHYS_OFFSET` used for image→direct-map translation (default: compiled `P0_PHYS_OFFSET = 0x80000000`). Set it for devices whose DRAM base differs (e.g. MTK `0x40000000`). A `boot.img` alone cannot supply it; take it from `/proc/iomem` (the extractor accepts `--iomem`, or a MediaTek `vendor_boot.img`) |
 | `recommend_shizuku` | Whether this kernel recommends the Shizuku path (0/1, default 0 when omitted; advisory only). It is not shown in any editor: for recommended kernels the app **turns the home-screen "Run via Shizuku" switch on at every start**. You can turn it off for the session, and once off the app stops requiring Shizuku for that session |
+| `recommend_vr_guard` | Whether this kernel recommends the vr.ko guard (0/1, default 0 when omitted; advisory only). The guard itself is gated by the runtime `/proc/modules` probe and is independent of this field |
+| `offset.vr_sys_exit_tp` + `vr_guard.tracepoint_funcs` | Composed form of the vivo `vr.ko` W1c target: the `__tracepoint_sys_exit` offset plus `offsetof(struct tracepoint, funcs)`; the sum is the image offset of the `funcs` array, zeroed between W1 and W2 (globally disarming the kill-on-sys_exit probe, which covers tasks forked later — the per-task W2b detag cannot). Both parts must be non-zero, otherwise the stage is skipped |
+| `offset.sys_exit_tp_funcs` | Direct single-field form of the same target (image offset of `__tracepoint_sys_exit->funcs`); either form works and the direct one wins |
 
 ### 4.4 select_stack / tcp route fields
 

@@ -45,7 +45,7 @@ internal object LegacyProfileConverter {
         "init_task", "init_cred",
         "root_task_group", "selinux_enforcing", "selinux_blob_sizes",
         "security_hook_heads", "slide_nfulnl_logger", "slide_loggers_0_1",
-        "slide_boot_id",
+        "slide_boot_id", "sys_exit_tp_funcs", "vr_sys_exit_tp",
     )
 
     /* Per-route legacy layout codec. Adding a route = add a codec + register it
@@ -162,6 +162,11 @@ internal object LegacyProfileConverter {
         /* Local transition builds also stored credential/tuning keys here. */
         moveGroup(entry, "struct_fields", "cred", "cred_", CredFields)
         val structFields = entry["struct_fields"].asValueMap() ?: return
+        /* Dev-format vr guard layout -> vr_guard { tracepoint_funcs } so the
+         * composed W1c transport can resolve from imported reports. */
+        val vrGuard = entry.mutableChild("vr_guard")
+        moveKey(structFields, vrGuard, "vr_tracepoint_funcs", "tracepoint_funcs")
+        if (vrGuard.isEmpty()) entry.remove("vr_guard")
         val snitch = entry.mutableChild("kernelsnitch")
         moveKey(structFields, snitch, "kernelsnitch_collisions", "collisions")
         moveKey(structFields, snitch, "mm_struct_sz", "mm_struct_sz")

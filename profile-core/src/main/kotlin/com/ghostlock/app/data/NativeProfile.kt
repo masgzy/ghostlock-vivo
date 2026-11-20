@@ -203,6 +203,7 @@ data class NativeProfileDocument(
         "slide_nfulnl_logger" to kernelOffset.slideNfulnlLogger,
         "slide_loggers_0_1" to kernelOffset.slideLoggers01,
         "slide_boot_id" to kernelOffset.slideBootId,
+        "sys_exit_tp_funcs" to kernelOffset.sysExitTpFuncs,
     )
 
     private fun kernelSection(): Section? {
@@ -400,6 +401,21 @@ data class NativeProfileDocument(
                     slideNfulnlLogger = vul("offset.slide_nfulnl_logger"),
                     slideLoggers01 = vul("offset.slide_loggers_0_1"),
                     slideBootId = vul("offset.slide_boot_id"),
+                    /* Direct single-field transport first; otherwise compose the
+                     * dev-format pair (offset.vr_sys_exit_tp +
+                     * vr_guard.tracepoint_funcs). Both parts must be non-zero:
+                     * a half-resolved pair must disable the stage, not aim the
+                     * write at the struct base. */
+                    sysExitTpFuncs = run {
+                        val direct = vul("offset.sys_exit_tp_funcs")
+                        if (direct != 0uL) {
+                            direct
+                        } else {
+                            val tp = vul("offset.vr_sys_exit_tp")
+                            val funcs = vul("vr_guard.tracepoint_funcs")
+                            if (tp != 0uL && funcs != 0uL) tp + funcs else 0uL
+                        }
+                    },
                 ),
                 kernelPhysLoad = vulOrNull("kernel_phys_load"),
                 kernelPhysOffset = vulOrNull("kernel_phys_offset"),
@@ -519,6 +535,7 @@ data class NativeProfileDocument(
                         "slide_nfulnl_logger" -> offsets.copy(slideNfulnlLogger = raw)
                         "slide_loggers_0_1" -> offsets.copy(slideLoggers01 = raw)
                         "slide_boot_id" -> offsets.copy(slideBootId = raw)
+                        "sys_exit_tp_funcs" -> offsets.copy(sysExitTpFuncs = raw)
                         else -> offsets
                     }
 
@@ -678,6 +695,7 @@ data class KernelOffsetTable(
     val slideNfulnlLogger: ULong = 0uL,
     val slideLoggers01: ULong = 0uL,
     val slideBootId: ULong = 0uL,
+    val sysExitTpFuncs: ULong = 0uL,
 )
 
 data class ExecutionTuning(
