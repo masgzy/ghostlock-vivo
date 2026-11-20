@@ -73,16 +73,24 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 callback.onLog("<s> Shizuku ready: uid=${Process.myUid()} Seccomp=0")
                 callback.onLog("<s> kernel: $release")
                 // Same resolution as the direct path: chosen manager first,
-                // then the built-ins. Native gets the path via GHOSTLOCK_KSUD.
+                // then the built-ins; name-randomized managers (SukiSU Nova)
+                // fall back to the content probe. Native gets the path via
+                // GHOSTLOCK_KSUD.
                 val pm = context.packageManager
                 val ksudPath = ManagerScanner.resolvePackages(managerPackage)
                     .asSequence()
-                    .map { pkg ->
-                        runCatching {
-                            File(pm.getApplicationInfo(pkg, 0).nativeLibraryDir, "libksud.so")
-                        }.getOrNull()?.takeIf { it.isFile }
+                    .mapNotNull { pkg ->
+                        val dir = runCatching {
+                            pm.getApplicationInfo(pkg, 0).nativeLibraryDir
+                        }.getOrNull() ?: return@mapNotNull null
+                        File(dir, "libksud.so").takeIf { it.isFile }
+                            ?: if (pkg in ManagerScanner.CONTENT_SCANNED) {
+                                ManagerScanner.findKsudByContent(File(dir))
+                            } else {
+                                null
+                            }
                     }
-                    .firstOrNull { it != null }
+                    .firstOrNull()
                 ksudPath?.let { callback.onLog("<s> ksud resolved: ${it.absolutePath}") }
                 val nativeLog = File(workDir, ".ghostlock_native.log")
                 // U01-S14: per-run KernelSU log so a previous run's markers can

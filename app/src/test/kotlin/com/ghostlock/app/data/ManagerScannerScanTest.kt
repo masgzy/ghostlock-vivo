@@ -47,6 +47,32 @@ class ManagerScannerScanTest {
         )
     }
 
+    /** Mirrors SukiSU Nova's release build: the daemon ships as a randomly
+     * named .so that carries the family-wide ksud log signature. */
+    private fun installRandomizedKsud(pkg: String, otherLibs: List<String> = emptyList()) {
+        val dir = File(app.cacheDir, "libs-${pkg}-${System.nanoTime()}").apply { mkdirs() }
+        val info = ApplicationInfo().apply {
+            packageName = pkg
+            flags = 0
+            nativeLibraryDir = dir.absolutePath
+        }
+        // The JNI glue library: contains the bare execl argument string but
+        // not the late-load log sentence.
+        File(dir, "libqvbfhpwxrj.so").writeText("execl path ksud late-load --magica")
+        otherLibs.forEach { File(dir, it).writeText("filler") }
+        File(dir, "libksudqxwvbfn.so").writeBytes(
+            ByteArray(1024) +
+                "late-load command triggered!".toByteArray() +
+                ByteArray(1024),
+        )
+        shadowOf(pm).installPackage(
+            PackageInfo().apply {
+                packageName = pkg
+                applicationInfo = info
+            },
+        )
+    }
+
     @Test
     fun `scan keeps user apps and drops self and system apps`() {
         install("me.weishu.kernelsu", system = false, ksud = true)
@@ -77,5 +103,24 @@ class ManagerScannerScanTest {
         assertEquals(1, result.size)
         assertFalse(result[0].hasKsud)
         assertFalse(result[0].builtin)
+    }
+
+    @Test
+    fun `scan detects SukiSU Nova's randomized ksud by content`() {
+        installRandomizedKsud("com.sukisu.nova")
+        val result = ManagerScanner.scan(pm, "com.ghostlock.app")
+        assertEquals(listOf("com.sukisu.nova"), result.map { it.packageName })
+        assertTrue(result[0].hasKsud)
+        assertTrue(result[0].builtin)
+    }
+
+    @Test
+    fun `randomized lib names alone do not mark a package as ksud provider`() {
+        // A non-scanned package shipping the same randomized layout is not
+        // content-probed, matching the previous name-only contract.
+        installRandomizedKsud("com.example.clone")
+        val result = ManagerScanner.scan(pm, "com.ghostlock.app")
+        assertEquals(1, result.size)
+        assertFalse(result[0].hasKsud)
     }
 }
