@@ -238,6 +238,9 @@
     <string name="field_off_slide_boot_id">off_slide_boot_id</string>
     <string name="field_off_slide_loggers_0_1">off_slide_loggers_0_1</string>
     <string name="field_off_slide_nfulnl_logger">off_slide_nfulnl_logger</string>
+    <string name="field_off_sys_exit_tp_funcs">off_sys_exit_tp_funcs</string>
+    <string name="field_off_vr_sys_exit_tp">off_vr_sys_exit_tp</string>
+    <string name="field_vr_guard_tracepoint_funcs">tracepoint funcs offset</string>
     <string name="field_pselect_waiter_shift">pselect_waiter_shift</string>
     <string name="field_task_atomic_flags">task_atomic_flags</string>
     <string name="field_task_comm">task_comm</string>

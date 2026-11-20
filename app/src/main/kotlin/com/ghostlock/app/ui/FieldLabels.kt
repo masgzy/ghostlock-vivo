@@ -82,6 +82,9 @@ private fun fieldLabelRes(path: String): Int? = when (path) {
     "offset.slide_boot_id" -> R.string.field_off_slide_boot_id
     "offset.slide_loggers_0_1" -> R.string.field_off_slide_loggers_0_1
     "offset.slide_nfulnl_logger" -> R.string.field_off_slide_nfulnl_logger
+    "offset.sys_exit_tp_funcs" -> R.string.field_off_sys_exit_tp_funcs
+    "offset.vr_sys_exit_tp" -> R.string.field_off_vr_sys_exit_tp
+    "vr_guard.tracepoint_funcs" -> R.string.field_vr_guard_tracepoint_funcs
     "route.select_stack.waiter_shift" -> R.string.field_pselect_waiter_shift
     "fallback.route.select_stack.waiter_shift" -> R.string.field_pselect_waiter_shift
     "task_struct.atomic_flags" -> R.string.field_task_atomic_flags

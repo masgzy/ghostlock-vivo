@@ -238,6 +238,9 @@
     <string name="field_off_slide_boot_id">boot_id 滑移偏移</string>
     <string name="field_off_slide_loggers_0_1">logger 滑移偏移（0/1）</string>
     <string name="field_off_slide_nfulnl_logger">nfulnl_logger 滑移偏移</string>
+    <string name="field_off_sys_exit_tp_funcs">sys_exit 探针 funcs 偏移</string>
+    <string name="field_off_vr_sys_exit_tp">vr sys_exit 探针偏移</string>
+    <string name="field_vr_guard_tracepoint_funcs">tracepoint funcs 结构内偏移</string>
     <string name="field_pselect_waiter_shift">pselect waiter 位移</string>
     <string name="field_task_atomic_flags">原子标志偏移</string>
     <string name="field_task_comm">进程名偏移</string>
