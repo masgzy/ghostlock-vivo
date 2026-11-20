@@ -173,6 +173,8 @@ route { multicast_waiter { waiter_off = 96, buffer_size = 264 } }
 | `recommend_vr_guard` | 该内核是否建议启用 vr.ko 防护（0/1，省略时为 0；仅提示不强制）。防护本身由运行时 `/proc/modules` 探测门控，与该字段无关 |
 | `offset.vr_sys_exit_tp` + `vr_guard.tracepoint_funcs` | vivo `vr.ko` W1c 目标的组合形式：`__tracepoint_sys_exit` 偏移 + `offsetof(struct tracepoint, funcs)`，两者相加得到 `funcs` 数组的镜像偏移，在 W1 与 W2 之间清零（全局拆除 sys_exit 杀进程探针，覆盖 W2b 逐任务摘标无法覆盖的后续 fork）。两者必须同时非零，否则阶段跳过 |
 | `offset.sys_exit_tp_funcs` | 同一目标的直接单字段形式（`__tracepoint_sys_exit->funcs` 镜像偏移）；与上面的组合形式二选一，直接形式优先 |
+| `offset.vr_tag_a` | vivo vr.ko 读取的 task_struct 标签 A 字节偏移（vendor_boot 探测；0 = 家族默认，由 flags 整字清除覆盖） |
+| `offset.vr_tag_b` | vivo vr.ko 读取的 task_struct 标签 B 字节偏移（vendor_boot 探测；0 = 家族默认，由 flags 整字清除覆盖） |
 
 ### 4.4 select_stack / tcp 路由字段
 

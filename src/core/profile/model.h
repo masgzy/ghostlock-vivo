@@ -110,6 +110,12 @@ namespace ghostlock::profile {
          * 0 = not provided: the W1c global neutralize is skipped and only the
          * per-task W2b tag clear protects the child. */
         uint64_t sys_exit_tp_funcs = 0;
+        /* task_struct byte offsets vivo's vr.ko de-tag code reads, probed
+         * from vendor_boot's lib/modules/vr.ko (extractor off_vr_tag_a/b).
+         * 0 = not provided: W2b falls back to the measured family
+         * constants (tag A covered by the thread_info.flags word clear,
+         * tag B = 0x2c). */
+        uint64_t vr_tag_a = 0, vr_tag_b = 0;
     };
 
     struct KernelMisc {

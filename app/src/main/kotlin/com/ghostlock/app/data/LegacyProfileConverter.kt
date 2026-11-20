@@ -42,10 +42,10 @@ internal object LegacyProfileConverter {
         "ref3_offset", "ref0_image", "ref1_image", "ref2_image", "ref3_image",
     )
     private val OffsetFields = setOf(
-        "init_task", "init_cred",
+        "init_task", "init_cred", "empty_zero_page",
         "root_task_group", "selinux_enforcing", "selinux_blob_sizes",
         "security_hook_heads", "slide_nfulnl_logger", "slide_loggers_0_1",
-        "slide_boot_id", "sys_exit_tp_funcs", "vr_sys_exit_tp",
+        "slide_boot_id", "sys_exit_tp_funcs", "vr_sys_exit_tp", "vr_tag_a", "vr_tag_b",
     )
 
     /* Per-route legacy layout codec. Adding a route = add a codec + register it

@@ -191,6 +191,8 @@ addresses into runtime addresses.
 | `recommend_vr_guard` | Whether this kernel recommends the vr.ko guard (0/1, default 0 when omitted; advisory only). The guard itself is gated by the runtime `/proc/modules` probe and is independent of this field |
 | `offset.vr_sys_exit_tp` + `vr_guard.tracepoint_funcs` | Composed form of the vivo `vr.ko` W1c target: the `__tracepoint_sys_exit` offset plus `offsetof(struct tracepoint, funcs)`; the sum is the image offset of the `funcs` array, zeroed between W1 and W2 (globally disarming the kill-on-sys_exit probe, which covers tasks forked later — the per-task W2b detag cannot). Both parts must be non-zero, otherwise the stage is skipped |
 | `offset.sys_exit_tp_funcs` | Direct single-field form of the same target (image offset of `__tracepoint_sys_exit->funcs`); either form works and the direct one wins |
+| `offset.vr_tag_a` | task_struct byte offset vivo's vr.ko reads for tag A (vendor_boot probe; 0 = family default, covered by the flags-word clear) |
+| `offset.vr_tag_b` | task_struct byte offset vivo's vr.ko reads for tag B (vendor_boot probe; 0 = family default, covered by the flags-word clear) |
 
 ### 4.4 select_stack / tcp route fields
 

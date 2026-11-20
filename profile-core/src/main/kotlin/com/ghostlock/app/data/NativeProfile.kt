@@ -204,6 +204,8 @@ data class NativeProfileDocument(
         "slide_loggers_0_1" to kernelOffset.slideLoggers01,
         "slide_boot_id" to kernelOffset.slideBootId,
         "sys_exit_tp_funcs" to kernelOffset.sysExitTpFuncs,
+        "vr_tag_a" to kernelOffset.vrTagA,
+        "vr_tag_b" to kernelOffset.vrTagB,
     )
 
     private fun kernelSection(): Section? {
@@ -416,6 +418,8 @@ data class NativeProfileDocument(
                             if (tp != 0uL && funcs != 0uL) tp + funcs else 0uL
                         }
                     },
+                    vrTagA = vul("offset.vr_tag_a"),
+                    vrTagB = vul("offset.vr_tag_b"),
                 ),
                 kernelPhysLoad = vulOrNull("kernel_phys_load"),
                 kernelPhysOffset = vulOrNull("kernel_phys_offset"),
@@ -536,6 +540,8 @@ data class NativeProfileDocument(
                         "slide_loggers_0_1" -> offsets.copy(slideLoggers01 = raw)
                         "slide_boot_id" -> offsets.copy(slideBootId = raw)
                         "sys_exit_tp_funcs" -> offsets.copy(sysExitTpFuncs = raw)
+                        "vr_tag_a" -> offsets.copy(vrTagA = raw)
+                        "vr_tag_b" -> offsets.copy(vrTagB = raw)
                         else -> offsets
                     }
 
@@ -696,6 +702,8 @@ data class KernelOffsetTable(
     val slideLoggers01: ULong = 0uL,
     val slideBootId: ULong = 0uL,
     val sysExitTpFuncs: ULong = 0uL,
+    val vrTagA: ULong = 0uL,
+    val vrTagB: ULong = 0uL,
 )
 
 data class ExecutionTuning(
