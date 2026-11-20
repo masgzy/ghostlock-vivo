@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
@@ -62,6 +63,9 @@ import com.ghostlock.app.R
 import com.ghostlock.app.data.ManagerScanner
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.ExecutionFieldValue
+import com.ghostlock.app.domain.model.ExploitChain
+import com.ghostlock.app.domain.model.KsudLibraryEntry
+import com.ghostlock.app.domain.model.TimerRootBinarySource
 import com.ghostlock.app.domain.model.ProfileFieldNode
 import com.ghostlock.app.domain.model.ShizukuStatus
 import com.ghostlock.app.domain.model.UserProfileFile
@@ -177,6 +181,17 @@ data class GhostlockUiState(
     val managerCandidates: List<ManagerScanner.Candidate> = emptyList(),
     val selectedManagerPackage: String? = null,
     val managerPickerVisible: Boolean = false,
+    /** Selected exploit chain (CVE-2026-43499 native / CVE-2026-98260 t98260). */
+    val exploitChain: ExploitChain = ExploitChain.GHOSTLOCK,
+    /** lib/arm64-v8a entries of the selected manager APK. */
+    val ksudEntries: List<KsudLibraryEntry> = emptyList(),
+    val ksudPickerVisible: Boolean = false,
+    val ksudSelectedEntry: String? = null,
+    /** TimerRoot config sheet. */
+    val timerRootConfigVisible: Boolean = false,
+    val timerRootBinaryAvailable: Boolean = false,
+    val timerRootBinarySource: TimerRootBinarySource = TimerRootBinarySource.MISSING,
+    val timerRootSymsRelease: String? = null,
 )
 
 enum class DialogType { NONE, LIST, INPUT, CONFIRM, NOTICE }
@@ -201,6 +216,17 @@ interface GhostlockActions {
     fun onOpenManagerPicker()
     fun onCloseManagerPicker()
     fun onManagerSelected(pkg: String?)
+    fun onExploitChainSelected(index: Int)
+    fun onOpenKsudLibraryPicker()
+    fun onCloseKsudLibraryPicker()
+    fun onKsudLibrarySelected(entry: String?)
+    fun onOpenTimerRootConfig()
+    fun onCloseTimerRootConfig()
+    fun onPickTimerRootBinary()
+    fun onPickTimerRootSyms()
+    fun onImportTimerRootBinary(uri: String)
+    fun onImportTimerRootSyms(uri: String)
+    fun onParseTimerRootSyms(input: String)
     fun onDialogItemSelected(index: Int)
     fun onDialogInputChange(value: String)
     fun onDialogConfirm(value: String)
@@ -385,6 +411,8 @@ internal fun GhostlockApp(
                 GhostlockOverwriteDialog(state = state, actions = actions)
                 GhostlockExecutionSheet(state = state, actions = actions)
                 GhostlockManagerPickerSheet(state = state, actions = actions)
+                KsudLibraryPickerSheet(state = state, actions = actions)
+                TimerRootConfigSheet(state = state, actions = actions)
             }
         }
     }
@@ -856,6 +884,39 @@ private fun ControlPanel(
                 summary = chosenLabel ?: stringResource(R.string.manager_summary_auto),
                 onClick = actions::onOpenManagerPicker,
             )
+            if (chosenLabel != null) {
+                ArrowPreference(
+                    title = stringResource(R.string.ksud_library_label),
+                    summary = state.ksudSelectedEntry?.substringAfterLast('/')
+                        ?: stringResource(R.string.ksud_library_auto),
+                    onClick = actions::onOpenKsudLibraryPicker,
+                )
+            }
+            /* 漏洞利用链:Ghostlock(CVE-2026-43499) 原生管线 / TimerRoot
+             * (CVE-2026-98260) 外部 t98260 二进制。置于 CPU 核心组上方:
+             * 链的选择决定了下方哪些配置项有意义。 */
+            OverlaySpinnerPreference(
+                title = stringResource(R.string.exploit_chain_label),
+                items = listOf(
+                    DropdownItem(icon = null, title = stringResource(R.string.exploit_chain_ghostlock)),
+                    DropdownItem(icon = null, title = stringResource(R.string.exploit_chain_timerroot)),
+                ),
+                selectedIndex = if (state.exploitChain == ExploitChain.TIMER_ROOT) 1 else 0,
+                onSelectedIndexChange = actions::onExploitChainSelected,
+            )
+            if (state.exploitChain == ExploitChain.TIMER_ROOT) {
+                ArrowPreference(
+                    title = stringResource(R.string.timerroot_config_title),
+                    summary = stringResource(
+                        when {
+                            !state.timerRootBinaryAvailable -> R.string.timerroot_config_missing_binary
+                            state.timerRootSymsRelease != null -> R.string.timerroot_config_ready
+                            else -> R.string.timerroot_config_no_syms
+                        },
+                    ),
+                    onClick = actions::onOpenTimerRootConfig,
+                )
+            }
             if (state.cpuPairLabels.isNotEmpty()) {
                 val customPair = state.customCpuPair
                 val customSummary = customPair?.let {
@@ -1190,3 +1251,207 @@ private fun lineColor(color: Int): Color = when (color) {
     0xFF60A5FA.toInt() -> Color(0xFF60A5FA)
     else -> Color(0xFFD1D5DB)
 }
+
+/* ---- libksud.so manual selection -----------------------------------------
+ *
+ * Lists every executable .so entry under lib/arm64-v8a of the manager APK,
+ * first (the daemon dwarfs the glue libraries). The entry our content
+ * signature identified is badged so the auto behaviour stays visible; the
+ * user's explicit pick overrides both the name-based and the content-probe
+ * resolution. Interaction model follows the reference TimerRoot manager
+ * picker (size + "recommended" hint), merged with our own detection marker.
+ */
+@Composable
+private fun KsudLibraryPickerSheet(
+    state: GhostlockUiState,
+    actions: GhostlockActions,
+) {
+    OverlayBottomSheet(
+        show = state.ksudPickerVisible,
+        title = stringResource(R.string.ksud_picker_title),
+        onDismissRequest = actions::onCloseKsudLibraryPicker,
+        content = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+                    .navigationBarsPadding()
+                    .selectableGroup(),
+            ) {
+                item {
+                    KsudLibraryRow(
+                        title = stringResource(R.string.ksud_library_auto),
+                        subtitle = stringResource(R.string.ksud_library_auto_summary),
+                        sizeLabel = null,
+                        badges = emptyList(),
+                        selected = state.ksudSelectedEntry == null,
+                    ) { actions.onKsudLibrarySelected(null) }
+                }
+                items(state.ksudEntries, key = { it.zipPath }) { entry ->
+                    val badges = buildList {
+                        if (entry.detectedKsud) add(stringResource(R.string.ksud_badge_detected))
+                        if (entry.sizeBytes >= 4L * 1024 * 1024) {
+                            add(stringResource(R.string.ksud_badge_recommended))
+                        }
+                    }
+                    KsudLibraryRow(
+                        title = entry.fileName,
+                        subtitle = entry.zipPath,
+                        sizeLabel = formatKsudSize(entry.sizeBytes),
+                        badges = badges,
+                        selected = state.ksudSelectedEntry == entry.zipPath,
+                    ) { actions.onKsudLibrarySelected(entry.zipPath) }
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun KsudLibraryRow(
+    title: String,
+    subtitle: String?,
+    sizeLabel: String?,
+    badges: List<String>,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(
+                selected = selected,
+                role = Role.RadioButton,
+                onClick = onClick,
+            )
+            .padding(horizontal = 24.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = title,
+                color = MiuixTheme.colorScheme.onBackground,
+            )
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onBackgroundVariant,
+                )
+            }
+            if (badges.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.padding(top = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    badges.forEach { badge ->
+                        Text(
+                            text = badge,
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = MiuixTheme.colorScheme.primary,
+                        )
+                    }
+                }
+            }
+        }
+        if (sizeLabel != null) {
+            Text(
+                text = sizeLabel,
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onBackgroundVariant,
+                modifier = Modifier.padding(start = 12.dp),
+            )
+        }
+        if (selected) {
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                tint = MiuixTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 12.dp),
+            )
+        }
+    }
+}
+
+private fun formatKsudSize(bytes: Long): String = when {
+    bytes >= 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1048576.0)
+    bytes >= 1024 -> "${bytes / 1024} KB"
+    else -> "$bytes B"
+}
+
+/* ---- TimerRoot (CVE-2026-98260) config -----------------------------------
+ *
+ * Deliberately separate from the GhostLock profile UI (see
+ * docs/analysis/timerroot-vr-extract-plan.md §3): the chain needs the t98260
+ * binary (embedded or imported) and an ic-syms symbol table, neither of
+ * which participates in the HOCON profile lifecycle.
+ */
+@Composable
+private fun TimerRootConfigSheet(
+    state: GhostlockUiState,
+    actions: GhostlockActions,
+) {
+    var timerRootSymsInput by remember { mutableStateOf("") }
+    OverlayBottomSheet(
+        show = state.timerRootConfigVisible,
+        title = stringResource(R.string.timerroot_config_title),
+        onDismissRequest = actions::onCloseTimerRootConfig,
+        content = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .navigationBarsPadding()
+                    .padding(bottom = 16.dp),
+            ) {
+                Text(
+                    text = stringResource(
+                        when (state.timerRootBinarySource) {
+                            TimerRootBinarySource.EMBEDDED -> R.string.timerroot_binary_embedded
+                            TimerRootBinarySource.IMPORTED -> R.string.timerroot_binary_imported
+                            TimerRootBinarySource.MISSING -> R.string.timerroot_binary_missing
+                        },
+                    ),
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onBackgroundVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                )
+                ArrowPreference(
+                    title = stringResource(R.string.timerroot_import_binary),
+                    summary = stringResource(R.string.timerroot_import_binary_summary),
+                    onClick = actions::onPickTimerRootBinary,
+                )
+                ArrowPreference(
+                    title = stringResource(R.string.timerroot_syms_title),
+                    summary = state.timerRootSymsRelease
+                        ?: stringResource(R.string.timerroot_syms_missing),
+                    onClick = actions::onPickTimerRootSyms,
+                )
+                TextField(
+                    value = timerRootSymsInput,
+                    onValueChange = { timerRootSymsInput = it },
+                    label = stringResource(R.string.timerroot_parse_hint),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 8.dp),
+                    singleLine = true,
+                )
+                TextButton(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 8.dp),
+                    text = stringResource(R.string.timerroot_parse_button),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                    onClick = { actions.onParseTimerRootSyms(timerRootSymsInput) },
+                )
+                Text(
+                    text = stringResource(R.string.timerroot_safety),
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onBackgroundVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                )
+            }
+        },
+    )
+}
+

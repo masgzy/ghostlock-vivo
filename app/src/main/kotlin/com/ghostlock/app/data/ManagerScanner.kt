@@ -2,6 +2,7 @@ package com.ghostlock.app.data
 
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import com.ghostlock.app.domain.model.KsudLibraryEntry
 import java.io.File
 import java.io.InputStream
 
@@ -141,6 +142,39 @@ object ManagerScanner {
         }
         return true
     }
+
+    /**
+     * Lists the executable `.so` entries under `lib/arm64-v8a/` of a manager
+     * APK, with the content-signature flag set on the one our marker
+     * identifies as ksud. Sorted by size descending (the daemon dwarfs every
+     * glue library), mirroring the reference TimerRoot picker.
+     */
+    fun listApkLibraries(apkPath: String): List<KsudLibraryEntry> {
+        val entries = runCatching {
+            java.util.zip.ZipFile(apkPath).use { zip ->
+                zip.entries().asSequence()
+                    .filter { it.name.startsWith("lib/arm64-v8a/") && it.name.endsWith(".so") }
+                    .map { it.name to it.size }
+                    .toList()
+            }
+        }.getOrDefault(emptyList())
+        return entries
+            .sortedByDescending { it.second }
+            .map { (name, size) ->
+                KsudLibraryEntry(
+                    zipPath = name,
+                    sizeBytes = size,
+                    detectedKsud = apkEntryHasSignature(apkPath, name),
+                )
+            }
+    }
+
+    private fun apkEntryHasSignature(apkPath: String, entry: String): Boolean =
+        runCatching {
+            java.util.zip.ZipFile(apkPath).use { zip ->
+                zip.getInputStream(zip.getEntry(entry)).use { it.hasSignature() }
+            }
+        }.getOrDefault(false)
 
     /** Pure sort, extracted so it is testable without a PackageManager. */
     fun sortComparator() = compareByDescending<Candidate> { it.builtin && it.hasKsud }

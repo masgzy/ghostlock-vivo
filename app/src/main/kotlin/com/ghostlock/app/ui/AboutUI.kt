@@ -149,8 +149,8 @@ internal fun AboutScreen(onBack: () -> Unit) {
             item(key = "source") {
                 AboutLink(
                     title = stringResource(R.string.about_source_code),
-                    summary = "github.com/YuKongA/ghostlock-app",
-                    onClick = { uriHandler.openUri("https://github.com/YuKongA/ghostlock-app") },
+                    summary = "github.com/masgzy/ghostlock-vivo",
+                    onClick = { uriHandler.openUri("https://github.com/masgzy/ghostlock-vivo") },
                 )
             }
             item(key = "origins-title") {
@@ -171,13 +171,38 @@ internal fun AboutScreen(onBack: () -> Unit) {
                     uriHandler.openUri("https://github.com/x-spy/CVE-2026-43499-popsicle")
                 }
             }
+            item(key = "hmascs") {
+                AboutLink("hmascs (vr.ko research)", "PR #257 vendor_boot probe / KSuRoot") {
+                    uriHandler.openUri("https://github.com/hmascs")
+                }
+            }
+            item(key = "dongders-ghostlock") {
+                AboutLink("DONGDERS/Ghostlock-vr", "vr.ko W1c disarm + disassembly derivation") {
+                    uriHandler.openUri("https://github.com/DONGDERS/Ghostlock-vr")
+                }
+            }
+            item(key = "dongders-dirtyfrag") {
+                AboutLink("DONGDERS/DirtyFalg-vr", "vrext extractor shape") {
+                    uriHandler.openUri("https://github.com/DONGDERS/DirtyFalg-vr")
+                }
+            }
+            item(key = "ic-timer") {
+                AboutLink("kzktor/ic-timer-lpe (GPL-3.0)", "CVE-2026-98260 TimerRoot chain") {
+                    uriHandler.openUri("https://github.com/kzktor/ic-timer-lpe")
+                }
+            }
+            item(key = "timerroot") {
+                AboutLink("xxTurborocketxx/TimerRoot", "TimerRoot front-end interaction") {
+                    uriHandler.openUri("https://github.com/xxTurborrocketxx/TimerRoot")
+                }
+            }
 
             item(key = "licenses-title") {
                 SmallTitle(text = stringResource(R.string.about_open_source))
             }
             item(key = "license") {
-                AboutLink("Apache License 2.0", "github.com/YuKongA/ghostlock-app/LICENSE") {
-                    uriHandler.openUri("https://github.com/YuKongA/ghostlock-app/blob/main/LICENSE")
+                AboutLink("GNU GPL v3.0", "github.com/masgzy/ghostlock-vivo/LICENSE") {
+                    uriHandler.openUri("https://github.com/masgzy/ghostlock-vivo/blob/main/LICENSE")
                 }
             }
             item(key = "miuix") {

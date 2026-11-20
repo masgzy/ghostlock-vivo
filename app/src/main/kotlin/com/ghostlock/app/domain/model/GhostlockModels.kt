@@ -4,6 +4,37 @@ data class CpuPair(val primary: Int, val consumer: Int) {
     override fun toString(): String = "$primary,$consumer"
 }
 
+/**
+ * Which exploit chain the Run button drives. GHOSTLOCK is the in-tree
+ * CVE-2026-43499 native pipeline; TIMER_ROOT shells out to the t98260
+ * binary (CVE-2026-98260, kzktor/ic-timer-lpe lineage) through Shizuku.
+ */
+enum class ExploitChain { GHOSTLOCK, TIMER_ROOT }
+
+/** One candidate library inside a manager APK's lib/arm64-v8a. */
+data class KsudLibraryEntry(
+    val zipPath: String,
+    val sizeBytes: Long,
+    /** Our content signature (late-load log line) matched this entry. */
+    val detectedKsud: Boolean,
+) {
+    val fileName: String get() = zipPath.substringAfterLast('/')
+}
+
+/** TimerRoot chain status shown by the config card. */
+data class TimerRootState(
+    val chain: ExploitChain = ExploitChain.GHOSTLOCK,
+    /** t98260 available: embedded asset or user-imported binary. */
+    val binaryAvailable: Boolean = false,
+    val binarySource: TimerRootBinarySource = TimerRootBinarySource.MISSING,
+    /** ic-syms table staged for this kernel (null = none). */
+    val symsRelease: String? = null,
+    /** User's explicit libksud.so choice inside the manager APK ("auto" = null). */
+    val ksudEntry: String? = null,
+)
+
+enum class TimerRootBinarySource { MISSING, EMBEDDED, IMPORTED }
+
 data class KernelSnapshot(
     val deviceName: String,
     val kernelRelease: String,

@@ -27,6 +27,38 @@ interface GhostlockRepository {
 
     fun setSelectedManagerPackage(pkg: String?)
 
+    fun exploitChain(): com.ghostlock.app.domain.model.ExploitChain
+
+    fun setExploitChain(chain: com.ghostlock.app.domain.model.ExploitChain)
+
+    /** Explicit libksud.so choice inside the selected manager APK; null = auto. */
+    fun ksudLibraryChoice(): String?
+
+    fun setKsudLibraryChoice(entry: String?)
+
+    /** The selected (or auto-resolved) manager's APK path, when installed. */
+    suspend fun managerApkPath(): String?
+
+    suspend fun listKsudLibraries(): List<com.ghostlock.app.domain.model.KsudLibraryEntry>
+
+    /** TimerRoot chain state: embedded/imported binary, staged ic-syms table. */
+    suspend fun timerRootState(): com.ghostlock.app.domain.model.TimerRootState
+
+    /** Imports a user-provided t98260 binary (SAF uri). Returns the stored name. */
+    suspend fun importTimerRootBinary(uri: String): String?
+
+    /** Parses an ic-syms table (CVE-2026-98260) from boot.img / OTA / URL. */
+    suspend fun parseTimerRootSyms(
+        input: String,
+        onLog: (String) -> Unit,
+    ): com.ghostlock.app.domain.model.ParseResult
+
+    /** Imports a ready-made ic-syms table (SAF uri). */
+    suspend fun importTimerRootSyms(uri: String): String?
+
+    /** Runs the TimerRoot (CVE-2026-98260) chain through Shizuku. */
+    suspend fun runExploitAsTimerRoot(onLog: (String) -> Unit): Int
+
     /** All installed non-system apps, compatible-first ordering. */
     suspend fun installedManagers(): List<ManagerScanner.Candidate>
 

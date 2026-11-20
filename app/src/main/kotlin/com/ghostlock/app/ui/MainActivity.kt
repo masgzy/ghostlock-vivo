@@ -98,6 +98,7 @@ class MainActivity : ComponentActivity() {
 
                     else -> documentPicker.launch(mimeTypes)
                 }
+                /* TimerRoot artifacts are single binaries/tables. */
             }
 
             GhostlockEffect.PickDebugFolder -> folderPicker.launch(null)
@@ -190,6 +191,17 @@ private fun GhostlockRoute(
             override fun onOpenManagerPicker() = viewModel.onOpenManagerPicker()
             override fun onCloseManagerPicker() = viewModel.onCloseManagerPicker()
             override fun onManagerSelected(pkg: String?) = viewModel.onManagerSelected(pkg)
+            override fun onExploitChainSelected(index: Int) = viewModel.onExploitChainSelected(index)
+            override fun onOpenKsudLibraryPicker() = viewModel.onOpenKsudLibraryPicker()
+            override fun onCloseKsudLibraryPicker() = viewModel.onCloseKsudLibraryPicker()
+            override fun onKsudLibrarySelected(entry: String?) = viewModel.onKsudLibrarySelected(entry)
+            override fun onOpenTimerRootConfig() = viewModel.onOpenTimerRootConfig()
+            override fun onCloseTimerRootConfig() = viewModel.onCloseTimerRootConfig()
+            override fun onPickTimerRootBinary() = viewModel.onPickTimerRootBinary()
+            override fun onPickTimerRootSyms() = viewModel.onPickTimerRootSyms()
+            override fun onImportTimerRootBinary(uri: String) = viewModel.onImportTimerRootBinary(uri)
+            override fun onImportTimerRootSyms(uri: String) = viewModel.onImportTimerRootSyms(uri)
+            override fun onParseTimerRootSyms(input: String) = viewModel.onParseTimerRootSyms(input)
             override fun onDialogItemSelected(index: Int) = viewModel.onDialogItemSelected(index)
             override fun onDialogInputChange(value: String) = viewModel.onDialogInputChange(value)
             override fun onDialogConfirm(value: String) = viewModel.onDialogConfirm(value)

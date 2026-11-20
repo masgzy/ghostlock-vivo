@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ghostlock.app.R
 import com.ghostlock.app.domain.model.CpuPair
+import com.ghostlock.app.domain.model.ExploitChain
 import com.ghostlock.app.domain.model.KernelSnapshot
 import com.ghostlock.app.domain.model.LogTone
 import com.ghostlock.app.domain.model.OffsetImportResult
@@ -46,7 +47,10 @@ sealed interface GhostlockEffect {
 
 private const val OverwriteSummaryLimit = 12
 
-enum class DocumentRequest { ImportOffsetsHocon, ImportOffsetsJson, BootImage, XblImage, PayloadImage, UefiImage, VendorBootImage }
+enum class DocumentRequest {
+    ImportOffsetsHocon, ImportOffsetsJson, BootImage, XblImage, PayloadImage, UefiImage,
+    VendorBootImage, TimerRootBinary, TimerRootSyms,
+}
 
 /** Options offered by [promptBootAttach], in display order. VENDOR_BOOT is
  * only ever added to that list for MediaTek devices */
@@ -866,6 +870,104 @@ class GhostlockViewModel(
 
     fun onRun() = runExploit()
 
+    /* ---- exploit chain (Ghostlock / TimerRoot) ---- */
+
+    fun onExploitChainSelected(index: Int) {
+        val chain = if (index == 1) ExploitChain.TIMER_ROOT else ExploitChain.GHOSTLOCK
+        repository.setExploitChain(chain)
+        mutableState.update { it.copy(exploitChain = chain) }
+        viewModelScope.launch(Dispatchers.IO) { refreshTimerRootState() }
+    }
+
+    fun onOpenKsudLibraryPicker() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val entries = runCatching { repository.listKsudLibraries() }.getOrDefault(emptyList())
+            val chosen = repository.ksudLibraryChoice()
+            mutableState.update {
+                it.copy(
+                    ksudEntries = entries,
+                    ksudPickerVisible = entries.isNotEmpty(),
+                    ksudSelectedEntry = chosen,
+                )
+            }
+            if (entries.isEmpty()) {
+                send(GhostlockEffect.Toast(R.string.ksud_picker_empty))
+            }
+        }
+    }
+
+    fun onCloseKsudLibraryPicker() {
+        mutableState.update { it.copy(ksudPickerVisible = false) }
+    }
+
+    fun onKsudLibrarySelected(entry: String?) {
+        repository.setKsudLibraryChoice(entry)
+        mutableState.update {
+            it.copy(ksudSelectedEntry = entry, ksudPickerVisible = false)
+        }
+    }
+
+    fun onImportTimerRootBinary(uri: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.importTimerRootBinary(uri) }
+                .onSuccess {
+                    appendLog("t98260 imported")
+                    refreshTimerRootState()
+                    send(GhostlockEffect.Toast(R.string.timerroot_binary_imported))
+                }
+                .onFailure {
+                    appendLog("t98260 import failed: ${it.message}")
+                    send(GhostlockEffect.Toast(R.string.timerroot_binary_invalid))
+                }
+        }
+    }
+
+    fun onImportTimerRootSyms(uri: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.importTimerRootSyms(uri) }
+                .onSuccess {
+                    appendLog("ic-syms table imported")
+                    refreshTimerRootState()
+                }
+                .onFailure {
+                    appendLog("ic-syms import failed: ${it.message}")
+                    send(GhostlockEffect.Toast(R.string.timerroot_syms_invalid))
+                }
+        }
+    }
+
+    fun onParseTimerRootSyms(input: String) {
+        if (!beginOperation()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                when (val result = repository.parseTimerRootSyms(input, ::appendLog)) {
+                    is ParseResult.Parsed -> {
+                        appendLog("ic-syms: table staged for ${result.releases.firstOrNull() ?: "?"}")
+                        refreshTimerRootState()
+                    }
+                    is ParseResult.Failed ->
+                        appendLog("ic-syms: parse failed (${result.reason ?: "exit ${result.code}"})")
+                    else -> {}
+                }
+            } finally {
+                endOperation()
+            }
+        }
+    }
+
+    private suspend fun refreshTimerRootState() {
+        runCatching { repository.timerRootState() }.onSuccess { state ->
+            mutableState.update {
+                it.copy(
+                    timerRootBinaryAvailable = state.binaryAvailable,
+                    timerRootBinarySource = state.binarySource,
+                    timerRootSymsRelease = state.symsRelease,
+                    ksudSelectedEntry = state.ksudEntry,
+                )
+            }
+        }
+    }
+
     /** Explains why the run button is greyed out. */
     fun onProfileInvalid() {
         val state = state.value
@@ -895,6 +997,10 @@ class GhostlockViewModel(
 
     private fun runExploit() {
         val snapshot = kernelSnapshot ?: return
+        if (repository.exploitChain() == ExploitChain.TIMER_ROOT) {
+            runTimerRoot()
+            return
+        }
         if (!snapshot.kernelSupported) {
             if (beginOperation()) {
                 appendLog("result: exploit chain unsupported by this kernel")
@@ -924,6 +1030,38 @@ class GhostlockViewModel(
         }
     }
 
+    /** TimerRoot chain: always Shizuku (98260 reads tracefs, shell domain only). */
+    private fun runTimerRoot() {
+        val state = state.value
+        if (!state.timerRootBinaryAvailable) {
+            send(GhostlockEffect.Toast(R.string.timerroot_binary_missing))
+            onOpenTimerRootConfig()
+            return
+        }
+        if (!beginOperation()) return
+        send(GhostlockEffect.KeepScreenAwake(true))
+        appendLog("==== start TimerRoot (CVE-2026-98260) ====")
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val code = repository.runExploitAsTimerRoot(::appendLog)
+                appendLog(if (code == 0) "result: chain completed" else "result: chain failed (exit code=$code)")
+                appendLog("exit code=$code")
+            } finally {
+                endOperation()
+                send(GhostlockEffect.KeepScreenAwake(false))
+            }
+        }
+    }
+
+    fun onOpenTimerRootConfig() {
+        mutableState.update { it.copy(timerRootConfigVisible = true) }
+        viewModelScope.launch(Dispatchers.IO) { refreshTimerRootState() }
+    }
+
+    fun onCloseTimerRootConfig() {
+        mutableState.update { it.copy(timerRootConfigVisible = false) }
+    }
+
     fun onCloseExecutionSheet() {
         if (running && !state.value.executionSheetDismissible) return
         mutableState.update { it.copy(executionSheetVisible = false) }
@@ -940,6 +1078,12 @@ class GhostlockViewModel(
 
     fun importOffsetsJson() =
         send(GhostlockEffect.PickDocument(DocumentRequest.ImportOffsetsJson))
+
+    fun onPickTimerRootBinary() =
+        send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootBinary))
+
+    fun onPickTimerRootSyms() =
+        send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootSyms))
 
     fun parseOffsets() {
         parseDialogStage = ParseDialogStage.Mode
@@ -1000,6 +1144,8 @@ class GhostlockViewModel(
             DocumentRequest.UefiImage -> stageUefi(uri)
             DocumentRequest.VendorBootImage -> stageVendorBoot(uri)
             DocumentRequest.PayloadImage -> stagePayload(uri)
+            DocumentRequest.TimerRootBinary -> onImportTimerRootBinary(uri)
+            DocumentRequest.TimerRootSyms -> onImportTimerRootSyms(uri)
             DocumentRequest.ImportOffsetsHocon, DocumentRequest.ImportOffsetsJson -> Unit
         }
     }
@@ -1015,6 +1161,8 @@ class GhostlockViewModel(
             DocumentRequest.UefiImage -> uris.firstOrNull()?.let(::stageUefi)
             DocumentRequest.VendorBootImage -> uris.firstOrNull()?.let(::stageVendorBoot)
             DocumentRequest.PayloadImage -> uris.firstOrNull()?.let(::stagePayload)
+            DocumentRequest.TimerRootBinary -> uris.firstOrNull()?.let(::onImportTimerRootBinary)
+            DocumentRequest.TimerRootSyms -> uris.firstOrNull()?.let(::onImportTimerRootSyms)
         }
     }
 
@@ -1090,8 +1238,10 @@ class GhostlockViewModel(
                 executionHasProfile = loaded?.hasProfile ?: false,
                 customCpuPair = loaded?.let(::customCpuPairOf),
                 selectedManagerPackage = repository.selectedManagerPackage(),
+                exploitChain = repository.exploitChain(),
             )
         }
+        refreshTimerRootState()
     }
 
     private fun importDocuments(uris: List<String>) {

@@ -12,6 +12,10 @@ import com.ghostlock.app.BuildInfo
 import com.ghostlock.app.data.ManagerScanner
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.DebugSettings
+import com.ghostlock.app.domain.model.ExploitChain
+import com.ghostlock.app.domain.model.KsudLibraryEntry
+import com.ghostlock.app.domain.model.TimerRootBinarySource
+import com.ghostlock.app.domain.model.TimerRootState
 import com.ghostlock.app.domain.model.KernelSnapshot
 import com.ghostlock.app.domain.model.OffsetCandidate
 import com.ghostlock.app.data.ota.OtaPayloadExtractor
@@ -64,6 +68,10 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
          * file so a kernel panic still leaves the last in_progress step for the
          * next launch to read. HOCON/JSON. */
         const val RunStateFileName = ".ghostlock_run_state.json"
+        const val PREF_EXPLOIT_CHAIN = "exploit_chain"
+        const val PREF_KSUD_ENTRY = "ksud_library_entry"
+        const val TIMER_ROOT_BINARY = "t98260.bin"
+        const val TIMER_ROOT_SYMS = "ic-syms.txt"
         const val StatusMarker = "\u001eGLK_STATUS"
         const val StatusAck = "\u001eGLK_STATUS_ACK\n"
         const val StatusDisabled = "\u001eGLK_STATUS_DISABLED"
@@ -206,6 +214,178 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
 
     override fun setSelectedManagerPackage(pkg: String?) {
         preferences.edit { putString(ManagerScanner.PREF_KEY, pkg) }
+    }
+
+    override fun exploitChain(): ExploitChain =
+        if (preferences.getString(PREF_EXPLOIT_CHAIN, null) == ExploitChain.TIMER_ROOT.name) {
+            ExploitChain.TIMER_ROOT
+        } else {
+            ExploitChain.GHOSTLOCK
+        }
+
+    override fun setExploitChain(chain: ExploitChain) {
+        preferences.edit { putString(PREF_EXPLOIT_CHAIN, chain.name) }
+    }
+
+    override fun ksudLibraryChoice(): String? =
+        preferences.getString(PREF_KSUD_ENTRY, null)?.takeIf { it.isNotBlank() }
+
+    override fun setKsudLibraryChoice(entry: String?) {
+        preferences.edit {
+            if (entry.isNullOrBlank()) remove(PREF_KSUD_ENTRY) else putString(PREF_KSUD_ENTRY, entry)
+        }
+    }
+
+    override suspend fun managerApkPath(): String? = withContext(Dispatchers.IO) {
+        val pm = appContext.packageManager
+        val chosen = selectedManagerPackage()
+        val candidates = if (chosen.isNullOrBlank()) {
+            ManagerScanner.resolvePackages(null)
+        } else {
+            listOf(chosen) + ManagerScanner.resolvePackages(null).filter { it != chosen }
+        }
+        candidates.firstNotNullOfOrNull { pkg ->
+            runCatching { pm.getApplicationInfo(pkg, 0).sourceDir }
+                .getOrNull()
+                ?.takeIf { File(it).isFile }
+        }
+    }
+
+    override suspend fun listKsudLibraries(): List<KsudLibraryEntry> =
+        withContext(Dispatchers.IO) {
+            val apk = managerApkPath() ?: return@withContext emptyList()
+            runCatching { ManagerScanner.listApkLibraries(apk) }.getOrDefault(emptyList())
+        }
+
+    override suspend fun timerRootState(): TimerRootState = withContext(Dispatchers.IO) {
+        val embedded = runCatching {
+            appContext.assets.open("t98260").use { it.readBytes().size }
+        }.getOrDefault(0) > 0
+        val imported = File(filesDir, TIMER_ROOT_BINARY).let { it.isFile && it.length() > 0 }
+        val binarySource = when {
+            embedded -> TimerRootBinarySource.EMBEDDED
+            imported -> TimerRootBinarySource.IMPORTED
+            else -> TimerRootBinarySource.MISSING
+        }
+        val syms = File(filesDir, TIMER_ROOT_SYMS)
+        val symsRelease = if (syms.isFile) {
+            syms.readLines().firstOrNull { it.startsWith("# build=") }?.removePrefix("# build=")
+        } else {
+            null
+        }
+        TimerRootState(
+            chain = exploitChain(),
+            binaryAvailable = binarySource != TimerRootBinarySource.MISSING,
+            binarySource = binarySource,
+            symsRelease = symsRelease,
+            ksudEntry = ksudLibraryChoice(),
+        )
+    }
+
+    override suspend fun importTimerRootBinary(uri: String): String? = withContext(Dispatchers.IO) {
+        val target = File(filesDir, TIMER_ROOT_BINARY)
+        appContext.contentResolver.openInputStream(uri.toUri())?.use { input ->
+            FileOutputStream(target).use { output -> input.copyTo(output) }
+        } ?: throw IOException("cannot open $uri")
+        if (target.length() < 1024) {
+            target.delete()
+            throw IOException("file too small to be the t98260 exploit")
+        }
+        TIMER_ROOT_BINARY
+    }
+
+    /**
+     * Runs the extractor with `--format ic-syms` against the same input
+     * universe as parseSource (boot.img / payload.bin / OTA zip / URL) and
+     * stages the result as the TimerRoot symbol table.
+     */
+    override suspend fun parseTimerRootSyms(
+        input: String,
+        onLog: (String) -> Unit,
+    ): ParseResult {
+        val binary = File(appContext.applicationInfo.nativeLibraryDir, ExtractBinaryName)
+        if (!binary.isFile) {
+            return ParseResult.Failed(1, "missing native binary: ${binary.absolutePath}")
+        }
+        return try {
+            val out = File(filesDir, TIMER_ROOT_SYMS)
+            val isRemoteUrl = input.startsWith("http://", ignoreCase = true) ||
+                input.startsWith("https://", ignoreCase = true)
+            var tempBoot: File? = null
+            val effectiveInput = if (isRemoteUrl) {
+                val extracted = OtaPayloadExtractor.extractPartitions(
+                    url = input,
+                    workDir = filesDir,
+                    onLog = onLog,
+                )
+                tempBoot = extracted.bootFile
+                extracted.bootFile.absolutePath
+            } else {
+                input
+            }
+            try {
+                onLog("<t> ic-syms: extracting from $effectiveInput")
+                val code = runProcess(
+                    ProcessBuilder(
+                        listOf(
+                            binary.absolutePath, effectiveInput,
+                            "--format", "ic-syms", "--out", out.absolutePath,
+                            "--work-dir", filesDir.absolutePath,
+                        ),
+                    ).directory(filesDir).redirectErrorStream(true).apply {
+                        environment()["GHOSTLOCK_HOME"] = filesDir.absolutePath
+                        environment()["TMPDIR"] = filesDir.absolutePath
+                        environment()["HOME"] = filesDir.absolutePath
+                    },
+                    onLog = onLog,
+                    timeoutSeconds = 1800,
+                )
+                onLog("<t> ic-syms exit code=$code")
+                if (code != 0 || !out.isFile) return ParseResult.Failed(code)
+                val release = out.readLines()
+                    .firstOrNull { it.startsWith("# build=") }
+                    ?.removePrefix("# build=")
+                    ?: return ParseResult.Failed(code, "table carries no build header")
+                ParseResult.Parsed(listOf(release), emptySet(), TIMER_ROOT_SYMS)
+            } finally {
+                tempBoot?.delete()
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            ParseResult.Failed(1, error.message)
+        }
+    }
+
+    override suspend fun importTimerRootSyms(uri: String): String? = withContext(Dispatchers.IO) {
+        val text = appContext.contentResolver.openInputStream(uri.toUri())
+            ?.bufferedReader()?.use { it.readText() }
+            ?: throw IOException("cannot open $uri")
+        val hasTarget = text.lineSequence().any { it.startsWith("__tracepoint_sys_exit=") }
+        if (!hasTarget) throw IOException("not an ic-syms table (no __tracepoint_sys_exit entry)")
+        File(filesDir, TIMER_ROOT_SYMS).writeText(text)
+        TIMER_ROOT_SYMS
+    }
+
+    override suspend fun runExploitAsTimerRoot(onLog: (String) -> Unit): Int {
+        val state = timerRootState()
+        if (!state.binaryAvailable) {
+            onLog("<t> error: t98260 binary is missing (embed assets/t98260 or import one)")
+            return 1
+        }
+        val syms = File(filesDir, TIMER_ROOT_SYMS).takeIf { it.isFile }?.readText()
+        val managerApk = managerApkPath()
+        if (managerApk == null) {
+            onLog("<t> warning: no manager APK found; the chain runs without ksud handoff")
+        }
+        resetRunState()
+        return shizukuRunner.runTimerRoot(
+            managerApk = managerApk,
+            ksudEntry = ksudLibraryChoice(),
+            symsTable = syms,
+            safeMode = safeModeEnabled,
+            onLog = onLog,
+        )
     }
 
     override suspend fun installedManagers(): List<ManagerScanner.Candidate> =
