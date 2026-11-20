@@ -1,6 +1,7 @@
 package com.ghostlock.app.data
 
 import android.app.Application
+import com.ghostlock.app.data.AssetConfigLoader
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.repository.ProfileConfigController
 import kotlinx.coroutines.runBlocking
@@ -41,10 +42,18 @@ class ProfileMigrationEquivalenceTest {
                         (release.startsWith("6.1.") || release.startsWith("6.6.") ||
                             release.startsWith("6.12."))
                 }
+                /* The legacy converter predates the multicast route (its own
+                 * doc block pins that), so multicast-era builtins cannot be
+                 * represented by a v1 fixture and stay out of the round trip. */
+                .filterNot { release ->
+                    AssetConfigLoader(context)
+                        .load("kernel_profiles/$release.conf")
+                        .let { text -> Regex("multicast_waiter \\{").containsMatchIn(text) }
+                }
                 .toSortedSet()
 
             assertEquals("fixture must cover every current 6.x builtin", current6x, legacyReleases)
-            assertEquals("remote/main fixture size", 63, legacyReleases.size)
+            assertEquals("remote/main fixture size", 70, legacyReleases.size)
 
             val pair = CpuPair(primary = 0, consumer = 1)
             for (release in legacyReleases) {

@@ -43,12 +43,26 @@ class NativeDocumentEquivalenceTest {
                 preferences = context.getSharedPreferences("native-doc-equivalence", 0)
                     .also { it.edit().clear().commit() },
             )
+            /* Regen mode: GHOSTLOCK_REGEN_GOLDEN=<path> rewrites the fixture
+             * after an intentional wire-format change, then still verifies
+             * every release hashes consistently. The path guards accidental
+             * runs (an empty env var never writes). */
+            val regenPath = System.getenv("GHOSTLOCK_REGEN_GOLDEN")
+            val regen = StringBuilder()
             for ((release, expected) in golden) {
                 val config = controller.load(release, pair)
                 assertTrue("$release did not resolve", config.hasProfile)
                 val bytes = controller.nativeDocument(config)
                 assertNotNull("$release has no native document", bytes)
-                assertEquals("$release wire bytes drifted", expected, sha256(bytes!!))
+                val actual = sha256(bytes!!)
+                if (regenPath.isNullOrBlank()) {
+                    assertEquals("$release wire bytes drifted", expected, actual)
+                } else {
+                    regen.append("$release $actual\n")
+                }
+            }
+            if (!regenPath.isNullOrBlank()) {
+                java.nio.file.Files.write(java.nio.file.Path.of(regenPath), regen.toString().toByteArray())
             }
         } finally {
             root.deleteRecursively()

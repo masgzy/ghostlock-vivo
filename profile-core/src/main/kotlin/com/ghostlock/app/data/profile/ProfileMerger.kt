@@ -30,7 +30,14 @@ object ProfileMerger {
         routePresets: Map<String, ValueMap>,
     ): ValueMap {
         val defaults = valueMapOf("release" to deviceRelease).apply {
-            if (tuningExecution != null) put("execution", tuningExecution)
+            /* Deep-copy the shared tuning layer: deepMergeValues below merges
+             * in place, and the exporter reuses one tuningExecution map across
+             * every profile in the index — aliasing it let an earlier
+             * profile's execution block (e.g. w1_attempts=25) poison every
+             * later release. */
+            if (tuningExecution != null) {
+                put("execution", tuningExecution.copyValue().asValueMap())
+            }
         }
         val resolved = mergeSource(
             mergeSource(
@@ -62,7 +69,9 @@ object ProfileMerger {
             val defaults = routePresets[route] ?: continue
             val existing = routes[route].asValueMap()
             if (existing == null) {
-                routes[route] = defaults
+                /* Same aliasing hazard as the tuning layer above: presets are
+                 * shared across merges, so insert a copy. */
+                routes[route] = defaults.copyValue().asValueMap()
                 continue
             }
             for ((key, value) in defaults) {
