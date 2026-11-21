@@ -1377,6 +1377,32 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         return uri.toString()
     }
 
+    override suspend fun readTimerRootSyms(): String? = withContext(Dispatchers.IO) {
+        val syms = File(filesDir, TIMER_ROOT_SYMS)
+        if (!syms.isFile) return@withContext null
+        runCatching { syms.readText() }.getOrNull()
+    }
+
+    override suspend fun writeTimerRootSyms(text: String): Boolean = withContext(Dispatchers.IO) {
+        val syms = File(filesDir, TIMER_ROOT_SYMS)
+        if (!syms.isFile) return@withContext false
+        /* Atomic-ish: stage the edit, then rename over the live table so a
+         * crash mid-write can never leave a half table behind. */
+        val staged = File(filesDir, "$TIMER_ROOT_SYMS.edit")
+        try {
+            staged.writeText(text)
+            if (!staged.renameTo(syms)) {
+                syms.delete()
+                staged.copyTo(syms, overwrite = true)
+            }
+            true
+        } catch (error: IOException) {
+            false
+        } finally {
+            staged.delete()
+        }
+    }
+
     override suspend fun publishTimerRootSyms(): String = withContext(Dispatchers.IO) {
         val syms = File(filesDir, TIMER_ROOT_SYMS)
         if (!syms.isFile) throw IOException("no ic-syms table staged")

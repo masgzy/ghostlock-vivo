@@ -99,15 +99,18 @@ class OtaPayloadExtractorTest {
         val out = ByteArrayOutputStream()
         out.write(byteArrayOf('C'.code.toByte(), 'r'.code.toByte(), 'A'.code.toByte(), 'U'.code.toByte()))
         out.write(byteArrayOf(0, 0, 0, 0, 0, 0, 0, 2)) // version 2
-        val m = manifestBytes
+        /* Widening first: an Int shift count is taken mod 32, so
+         * `size ushr 32` on an Int is `size ushr 0` and the big-endian
+         * encoding would silently duplicate low bytes into high ones. */
+        val manifestSize = manifestBytes.size.toLong()
         out.write(byteArrayOf(
-            (m.size ushr 56).toByte(), (m.size ushr 48).toByte(),
-            (m.size ushr 40).toByte(), (m.size ushr 32).toByte(),
-            (m.size ushr 24).toByte(), (m.size ushr 16).toByte(),
-            (m.size ushr 8).toByte(), m.size.toByte(),
+            (manifestSize shr 56).toByte(), (manifestSize shr 48).toByte(),
+            (manifestSize shr 40).toByte(), (manifestSize shr 32).toByte(),
+            (manifestSize shr 24).toByte(), (manifestSize shr 16).toByte(),
+            (manifestSize shr 8).toByte(), manifestSize.toByte(),
         ))
         out.write(byteArrayOf(0, 0, 0, 0)) // signature size
-        out.write(m)
+        out.write(manifestBytes)
         out.write(blob)
         return out.toByteArray()
     }

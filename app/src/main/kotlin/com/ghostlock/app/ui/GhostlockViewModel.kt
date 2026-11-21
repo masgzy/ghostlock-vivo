@@ -5,6 +5,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ghostlock.app.R
+import com.ghostlock.app.data.TimerRootTable
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.ExploitChain
 import com.ghostlock.app.domain.model.KernelSnapshot
@@ -14,6 +15,7 @@ import com.ghostlock.app.domain.model.ParseResult
 import com.ghostlock.app.domain.model.ProfileConfig
 import com.ghostlock.app.domain.model.ProfileFieldNode
 import com.ghostlock.app.domain.model.ShizukuStatus
+import com.ghostlock.app.domain.model.TimerRootGeometry
 import com.ghostlock.app.domain.repository.GhostlockRepository
 import com.ghostlock.app.domain.repository.ProfileConfigController
 import com.ghostlock.app.domain.usecase.FormatLogUseCase
@@ -1174,12 +1176,128 @@ class GhostlockViewModel(
     }
 
     fun onOpenTimerRootConfig() {
-        mutableState.update { it.copy(timerRootConfigVisible = true) }
+        mutableState.update {
+            it.copy(
+                timerRootConfigVisible = true,
+                timerRootLoadConfigVisible = false,
+                timerRootEditVisible = false,
+                timerRootDocsVisible = false,
+            )
+        }
         viewModelScope.launch(Dispatchers.IO) { refreshTimerRootState() }
     }
 
     fun onCloseTimerRootConfig() {
-        mutableState.update { it.copy(timerRootConfigVisible = false) }
+        mutableState.update {
+            it.copy(
+                timerRootConfigVisible = false,
+                timerRootLoadConfigVisible = false,
+                timerRootEditVisible = false,
+                timerRootDocsVisible = false,
+            )
+        }
+    }
+
+    /* ---- TimerRoot 配置的多级页 ---- */
+
+    fun onOpenTimerRootLoadConfig() {
+        mutableState.update { it.copy(timerRootLoadConfigVisible = true) }
+        viewModelScope.launch(Dispatchers.IO) { refreshTimerRootState() }
+    }
+
+    fun onCloseTimerRootLoadConfig() {
+        mutableState.update { it.copy(timerRootLoadConfigVisible = false) }
+    }
+
+    fun onOpenTimerRootDocs() {
+        mutableState.update { it.copy(timerRootDocsVisible = true) }
+    }
+
+    fun onCloseTimerRootDocs() {
+        mutableState.update { it.copy(timerRootDocsVisible = false) }
+    }
+
+    /**
+     * Loads the staged ic-syms table into the edit fields. Only the `off.*`
+     * geometry block and the hard target symbol are editable — the rest of the
+     * table is preserved verbatim on save.
+     */
+    fun onOpenTimerRootEdit() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = runCatching { repository.readTimerRootSyms() }.getOrNull()
+            if (text == null) {
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_no_table))
+                return@launch
+            }
+            val fields = timerRootEditFieldsOf(text)
+            mutableState.update {
+                it.copy(
+                    timerRootEditVisible = true,
+                    timerRootEditFields = fields,
+                    timerRootEditDirty = false,
+                )
+            }
+        }
+    }
+
+    fun onCloseTimerRootEdit() {
+        mutableState.update { it.copy(timerRootEditVisible = false) }
+    }
+
+    fun onTimerRootFieldChanged(index: Int, value: String) {
+        mutableState.update { current ->
+            val fields = current.timerRootEditFields.toMutableList()
+            if (index in fields.indices) {
+                fields[index] = fields[index].copy(value = value)
+            }
+            current.copy(timerRootEditFields = fields, timerRootEditDirty = true)
+        }
+    }
+
+    /** Saves the edited fields back into the staged table. */
+    fun onSaveTimerRootEdits() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = runCatching { repository.readTimerRootSyms() }.getOrNull()
+            if (text == null) {
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_no_table))
+                return@launch
+            }
+            val edited = applyTimerRootEdits(text, state.value.timerRootEditFields)
+            /* Gate the write on the hard target: a table whose
+             * __tracepoint_sys_exit no longer parses is refused, not saved. */
+            val summary = TimerRootTable.summarize(edited)
+            if (!summary.hasTracepointTarget) {
+                appendLog("timerroot edit rejected: no __tracepoint_sys_exit value")
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_invalid))
+                return@launch
+            }
+            val ok = repository.writeTimerRootSyms(edited)
+            if (ok) {
+                appendLog("ic-syms table edited (${state.value.timerRootEditFields.size} fields)")
+                refreshTimerRootState()
+                mutableState.update { it.copy(timerRootEditDirty = false) }
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_saved))
+            } else {
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_invalid))
+            }
+        }
+    }
+
+    /** Reloads the edit fields from the staged table, discarding changes. */
+    fun onRevertTimerRootEdits() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = runCatching { repository.readTimerRootSyms() }.getOrNull()
+            if (text == null) {
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_no_table))
+                return@launch
+            }
+            mutableState.update {
+                it.copy(
+                    timerRootEditFields = timerRootEditFieldsOf(text),
+                    timerRootEditDirty = false,
+                )
+            }
+        }
     }
 
     fun onCloseExecutionSheet() {
@@ -2011,5 +2129,90 @@ class GhostlockViewModel(
             val uefiPath: String?,
             val vendorBootPath: String? = null,
         ) : PendingConfirmation
+    }
+}
+
+/* ---- ic-syms 编辑页的字段解析（文件级 helper，纯函数便于单测） ---- */
+
+/** The hard target symbol the edit page exposes next to the geometry. */
+internal const val TimerRootHardTarget = "__tracepoint_sys_exit"
+
+/**
+ * Parses the staged ic-syms text into the editable fields: every recognized
+ * `off.<key>` geometry line (essential keys first, then optional ones) plus the
+ * hard target symbol. Line order inside the file is irrelevant — the save path
+ * matches keys, not positions.
+ */
+internal fun timerRootEditFieldsOf(text: String): List<TimerRootSymsField> {
+    val geometry = linkedMapOf<String, String>()
+    var hardTarget: String? = null
+    text.lineSequence().forEach { raw ->
+        val line = raw.trimEnd('\r', '\n')
+        when {
+            line.startsWith("off.") -> {
+                val key = line.substringAfter("off.").substringBefore('=')
+                val value = line.substringAfter('=', "")
+                if (key in TimerRootGeometry.KNOWN_KEYS && value.isNotBlank()) {
+                    geometry[key] = value.trim()
+                }
+            }
+
+            line.startsWith("$TimerRootHardTarget=") ->
+                hardTarget = line.substringAfter('=', "").trim()
+        }
+    }
+    val ordered = TimerRootGeometry.ESSENTIAL_KEYS.filter { it in geometry } +
+        (geometry.keys - TimerRootGeometry.ESSENTIAL_KEYS.toSet())
+    return buildList {
+        ordered.forEach { key ->
+            add(
+                TimerRootSymsField(
+                    key = key,
+                    label = "off.$key",
+                    value = geometry[key].orEmpty(),
+                    isGeometry = true,
+                ),
+            )
+        }
+        hardTarget?.let {
+            add(
+                TimerRootSymsField(
+                    key = TimerRootHardTarget,
+                    label = TimerRootHardTarget,
+                    value = it,
+                    isGeometry = false,
+                ),
+            )
+        }
+    }
+}
+
+/**
+ * Writes the edited field values back into the table text: each `off.<key>=`
+ * line and the hard target line is replaced in place; every other line (the
+ * symbol table itself, banners, comments) is preserved verbatim.
+ */
+internal fun applyTimerRootEdits(text: String, fields: List<TimerRootSymsField>): String {
+    val byKey = fields.associateBy { it.key }
+    return text.lineSequence().joinToString(separator = "\n") { raw ->
+        val line = raw.trimEnd('\r', '\n')
+        when {
+            line.startsWith("off.") -> {
+                val key = line.substringAfter("off.").substringBefore('=')
+                val edited = byKey[key]?.value
+                if (key in TimerRootGeometry.KNOWN_KEYS && !edited.isNullOrBlank()) {
+                    "off.$key=$edited"
+                } else {
+                    line
+                }
+            }
+
+            line.startsWith("$TimerRootHardTarget=") -> {
+                val edited = byKey[TimerRootHardTarget]?.value
+                if (!edited.isNullOrBlank()) "$TimerRootHardTarget=$edited" else line
+            }
+
+            else -> line
+        }
     }
 }

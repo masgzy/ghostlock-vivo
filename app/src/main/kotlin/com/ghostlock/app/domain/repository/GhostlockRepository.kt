@@ -64,6 +64,15 @@ interface GhostlockRepository {
      * content uri (for sharing). Throws when no table is staged. */
     suspend fun publishTimerRootSyms(): String
 
+    /** The staged ic-syms table text, or null when nothing is staged. */
+    suspend fun readTimerRootSyms(): String?
+
+    /**
+     * Writes the edited ic-syms table back atomically (staged partial file +
+     * rename). Returns false when no table was staged or the write failed.
+     */
+    suspend fun writeTimerRootSyms(text: String): Boolean
+
     /** IC_ALLOW_ANY_KERNEL for the TimerRoot chain (see TimerRootState). */
     fun timerRootAllowAnyKernel(): Boolean
 
