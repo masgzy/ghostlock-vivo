@@ -187,11 +187,15 @@ data class GhostlockUiState(
     val ksudEntries: List<KsudLibraryEntry> = emptyList(),
     val ksudPickerVisible: Boolean = false,
     val ksudSelectedEntry: String? = null,
-    /** TimerRoot config sheet. */
+    /** TimerRoot (98260) config screen. */
     val timerRootConfigVisible: Boolean = false,
     val timerRootBinaryAvailable: Boolean = false,
     val timerRootBinarySource: TimerRootBinarySource = TimerRootBinarySource.MISSING,
+    val timerRootBinarySize: Long = 0,
     val timerRootSymsRelease: String? = null,
+    val timerRootSymsSymbols: Int = 0,
+    val timerRootSymsGeometryKeys: Int = 0,
+    val timerRootSymsGeometryEssential: Int = 0,
     /** IC_ALLOW_ANY_KERNEL gate for the TimerRoot chain. */
     val timerRootAllowAnyKernel: Boolean = false,
     /** Auto-open the root manager after a successful escalation (both chains). */
@@ -228,8 +232,12 @@ interface GhostlockActions {
     fun onCloseTimerRootConfig()
     fun onPickTimerRootBinary()
     fun onPickTimerRootSyms()
+    fun onPickTimerRootOta()
+    fun onPickTimerRootImage()
     fun onImportTimerRootBinary(uri: String)
     fun onImportTimerRootSyms(uri: String)
+    fun onExportTimerRootSyms()
+    fun onRemoveTimerRootBinary()
     fun onSetTimerRootAllowAnyKernel(enabled: Boolean)
     fun onSetLaunchManagerOnSuccess(enabled: Boolean)
     fun onParseTimerRootSyms(input: String)
@@ -290,14 +298,26 @@ internal sealed interface GhostlockScreen : NavKey {
     data class UserProfileDetail(val name: String) : GhostlockScreen
     data object ProfileOverride : GhostlockScreen
     data object AdvancedOverride : GhostlockScreen
+    data object TimerRootConfig : GhostlockScreen
 }
 
 internal fun navigationPath(state: GhostlockUiState): List<GhostlockScreen> {
     val path = mutableListOf<GhostlockScreen>(GhostlockScreen.Main)
+    /* The TimerRoot config is reachable from the main page directly (the
+     * TimerRoot 配置 entry) and from Advanced (the 98260 配置 row below
+     * 参数配置); the same flag drives both. */
+    if (state.timerRootConfigVisible && !state.advancedScreenVisible) {
+        path += GhostlockScreen.TimerRootConfig
+        return path
+    }
     if (!state.advancedScreenVisible) return path
     path += GhostlockScreen.Advanced
     if (state.aboutVisible) {
         path += GhostlockScreen.About
+        return path
+    }
+    if (state.timerRootConfigVisible) {
+        path += GhostlockScreen.TimerRootConfig
         return path
     }
     if (!state.parametersVisible) return path
@@ -339,6 +359,7 @@ private fun closeScreen(screen: GhostlockScreen, actions: GhostlockActions) {
         is GhostlockScreen.UserProfileDetail -> actions.onCloseUserProfileDetail()
         GhostlockScreen.ProfileOverride -> actions.onCloseProfileOverrides()
         GhostlockScreen.AdvancedOverride -> actions.onCloseAdvancedOverrides()
+        GhostlockScreen.TimerRootConfig -> actions.onCloseTimerRootConfig()
     }
 }
 
@@ -412,13 +433,15 @@ internal fun GhostlockApp(
                     entry<GhostlockScreen.AdvancedOverride>(swipeDismiss = swipeBack) {
                         AdvancedOverrideScreen(state = state, actions = actions)
                     }
+                    entry<GhostlockScreen.TimerRootConfig>(swipeDismiss = swipeBack) {
+                        TimerRootConfigScreen(state = state, actions = actions)
+                    }
                 }
                 GhostlockDialog(state = state, actions = actions)
                 GhostlockOverwriteDialog(state = state, actions = actions)
                 GhostlockExecutionSheet(state = state, actions = actions)
                 GhostlockManagerPickerSheet(state = state, actions = actions)
                 KsudLibraryPickerSheet(state = state, actions = actions)
-                TimerRootConfigSheet(state = state, actions = actions)
             }
         }
     }
@@ -910,19 +933,20 @@ private fun ControlPanel(
                 selectedIndex = if (state.exploitChain == ExploitChain.TIMER_ROOT) 1 else 0,
                 onSelectedIndexChange = actions::onExploitChainSelected,
             )
-            if (state.exploitChain == ExploitChain.TIMER_ROOT) {
-                ArrowPreference(
-                    title = stringResource(R.string.timerroot_config_title),
-                    summary = stringResource(
-                        when {
-                            !state.timerRootBinaryAvailable -> R.string.timerroot_config_missing_binary
-                            state.timerRootSymsRelease != null -> R.string.timerroot_config_ready
-                            else -> R.string.timerroot_config_no_syms
-                        },
-                    ),
-                    onClick = actions::onOpenTimerRootConfig,
-                )
-            }
+            /* TimerRoot 配置: always reachable from the main page so the
+             * table can be parsed/imported before switching the chain. The
+             * summary reflects the staging state. */
+            ArrowPreference(
+                title = stringResource(R.string.timerroot_config_title),
+                summary = stringResource(
+                    when {
+                        !state.timerRootBinaryAvailable -> R.string.timerroot_config_missing_binary
+                        state.timerRootSymsRelease != null -> R.string.timerroot_config_ready
+                        else -> R.string.timerroot_config_no_syms
+                    },
+                ),
+                onClick = actions::onOpenTimerRootConfig,
+            )
             if (state.cpuPairLabels.isNotEmpty()) {
                 val customPair = state.customCpuPair
                 val customSummary = customPair?.let {
@@ -1389,87 +1413,5 @@ private fun formatKsudSize(bytes: Long): String = when {
     bytes >= 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1048576.0)
     bytes >= 1024 -> "${bytes / 1024} KB"
     else -> "$bytes B"
-}
-
-/* ---- TimerRoot (CVE-2026-98260) config -----------------------------------
- *
- * Deliberately separate from the GhostLock profile UI (see
- * docs/analysis/timerroot-vr-extract-plan.md §3): the chain needs the t98260
- * binary (embedded or imported) and an ic-syms symbol table, neither of
- * which participates in the HOCON profile lifecycle.
- */
-@Composable
-private fun TimerRootConfigSheet(
-    state: GhostlockUiState,
-    actions: GhostlockActions,
-) {
-    var timerRootSymsInput by remember { mutableStateOf("") }
-    OverlayBottomSheet(
-        show = state.timerRootConfigVisible,
-        title = stringResource(R.string.timerroot_config_title),
-        onDismissRequest = actions::onCloseTimerRootConfig,
-        content = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 520.dp)
-                    .navigationBarsPadding()
-                    .padding(bottom = 16.dp),
-            ) {
-                Text(
-                    text = stringResource(
-                        when (state.timerRootBinarySource) {
-                            TimerRootBinarySource.EMBEDDED -> R.string.timerroot_binary_embedded
-                            TimerRootBinarySource.IMPORTED -> R.string.timerroot_binary_imported
-                            TimerRootBinarySource.MISSING -> R.string.timerroot_binary_missing
-                        },
-                    ),
-                    style = MiuixTheme.textStyles.footnote1,
-                    color = MiuixTheme.colorScheme.onBackgroundVariant,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-                )
-                ArrowPreference(
-                    title = stringResource(R.string.timerroot_import_binary),
-                    summary = stringResource(R.string.timerroot_import_binary_summary),
-                    onClick = actions::onPickTimerRootBinary,
-                )
-                ArrowPreference(
-                    title = stringResource(R.string.timerroot_syms_title),
-                    summary = state.timerRootSymsRelease
-                        ?: stringResource(R.string.timerroot_syms_missing),
-                    onClick = actions::onPickTimerRootSyms,
-                )
-                SwitchPreference(
-                    checked = state.timerRootAllowAnyKernel,
-                    onCheckedChange = actions::onSetTimerRootAllowAnyKernel,
-                    title = stringResource(R.string.timerroot_allow_any_kernel_label),
-                    summary = stringResource(R.string.timerroot_allow_any_kernel_summary),
-                )
-                TextField(
-                    value = timerRootSymsInput,
-                    onValueChange = { timerRootSymsInput = it },
-                    label = stringResource(R.string.timerroot_parse_hint),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 8.dp),
-                    singleLine = true,
-                )
-                TextButton(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 8.dp),
-                    text = stringResource(R.string.timerroot_parse_button),
-                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                    onClick = { actions.onParseTimerRootSyms(timerRootSymsInput) },
-                )
-                Text(
-                    text = stringResource(R.string.timerroot_safety),
-                    style = MiuixTheme.textStyles.footnote1,
-                    color = MiuixTheme.colorScheme.onBackgroundVariant,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-                )
-            }
-        },
-    )
 }
 

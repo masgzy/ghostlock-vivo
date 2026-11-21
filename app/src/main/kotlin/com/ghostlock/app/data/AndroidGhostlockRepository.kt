@@ -75,6 +75,10 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         const val PrefLaunchManagerOnSuccess = "launch_manager_on_success"
         const val TIMER_ROOT_BINARY = "t98260.bin"
         const val TIMER_ROOT_SYMS = "ic-syms.txt"
+        /** The CI-built generic 98260 core, packaged as a jniLib (the file
+         * is a static PIE executable; the name only makes the APK installer
+         * extract it). Staged to /data/local/tmp by the Shizuku runner. */
+        const val TIMER_ROOT_LIBRARY = "libtimerroot.so"
         /* An ic-syms table is a few tens of KiB of text; anything larger is a
          * picked image and must go through the extractor. 2 MiB leaves room
          * for verbose per-build tables. */
@@ -265,26 +269,36 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         }
 
     override suspend fun timerRootState(): TimerRootState = withContext(Dispatchers.IO) {
+        val imported = File(filesDir, TIMER_ROOT_BINARY).takeIf { it.isFile && it.length() > 0 }
+        val bundled = File(appContext.applicationInfo.nativeLibraryDir, TIMER_ROOT_LIBRARY)
+            .takeIf { it.isFile && it.length() > 0 }
         val embedded = runCatching {
             appContext.assets.open("t98260").use { it.readBytes().size }
         }.getOrDefault(0) > 0
-        val imported = File(filesDir, TIMER_ROOT_BINARY).let { it.isFile && it.length() > 0 }
-        val binarySource = when {
-            embedded -> TimerRootBinarySource.EMBEDDED
-            imported -> TimerRootBinarySource.IMPORTED
-            else -> TimerRootBinarySource.MISSING
+        /* Same precedence as GhostlockUserService.stageTimerRootBinary: an
+         * explicit import wins, then the CI-built generic library, then the
+         * legacy dev asset. */
+        val (source, size) = when {
+            imported != null -> TimerRootBinarySource.IMPORTED to imported.length()
+            bundled != null -> TimerRootBinarySource.BUNDLED to bundled.length()
+            embedded -> TimerRootBinarySource.EMBEDDED to 0L
+            else -> TimerRootBinarySource.MISSING to 0L
         }
         val syms = File(filesDir, TIMER_ROOT_SYMS)
-        val symsRelease = if (syms.isFile) {
-            syms.readLines().firstOrNull { it.startsWith("# build=") }?.removePrefix("# build=")
+        val summary = if (syms.isFile) {
+            runCatching { TimerRootTable.summarize(syms.readText()) }.getOrNull()
         } else {
             null
         }
         TimerRootState(
             chain = exploitChain(),
-            binaryAvailable = binarySource != TimerRootBinarySource.MISSING,
-            binarySource = binarySource,
-            symsRelease = symsRelease,
+            binaryAvailable = source != TimerRootBinarySource.MISSING,
+            binarySource = source,
+            binarySizeBytes = size,
+            symsRelease = summary?.release,
+            symsSymbols = summary?.symbols ?: 0,
+            symsGeometryKeys = summary?.geometryKeys ?: 0,
+            symsGeometryEssential = summary?.geometryEssential ?: 0,
             ksudEntry = ksudLibraryChoice(),
             allowAnyKernel = timerRootAllowAnyKernel(),
         )
@@ -302,10 +316,19 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         TIMER_ROOT_BINARY
     }
 
+    override suspend fun removeTimerRootBinary() {
+        withContext(Dispatchers.IO) {
+            File(filesDir, TIMER_ROOT_BINARY).delete()
+        }
+    }
+
     /**
      * Runs the extractor with `--format ic-syms` against the same input
-     * universe as parseSource (boot.img / payload.bin / OTA zip / URL) and
-     * stages the result as the TimerRoot symbol table.
+     * universe as parseSource (boot.img / payload.bin / local OTA zip / URL)
+     * and stages the result as the TimerRoot table. A local path is passed
+     * straight through — the extractor sniffs the container itself — while a
+     * URL is downloaded and unpacked to boot.img first. The output carries
+     * the BTF geometry block when the image has BTF.
      */
     override suspend fun parseTimerRootSyms(
         input: String,
@@ -457,7 +480,7 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
     override suspend fun runExploitAsTimerRoot(onLog: (String) -> Unit): Int {
         val state = timerRootState()
         if (!state.binaryAvailable) {
-            onLog("<t> error: t98260 binary is missing (embed assets/t98260 or import one)")
+            onLog("<t> error: t98260 binary is missing (bundled libtimerroot.so absent and no import)")
             return 1
         }
         val syms = File(filesDir, TIMER_ROOT_SYMS).takeIf { it.isFile }?.readText()
@@ -1144,6 +1167,24 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             output.write(candidate.document.toByteArray(StandardCharsets.UTF_8))
         } ?: throw IOException("cannot open download entry")
         return uri.toString()
+    }
+
+    override suspend fun publishTimerRootSyms(): String = withContext(Dispatchers.IO) {
+        val syms = File(filesDir, TIMER_ROOT_SYMS)
+        if (!syms.isFile) throw IOException("no ic-syms table staged")
+        val summary = TimerRootTable.summarize(syms.readText())
+        if (!summary.hasTracepointTarget) throw IOException("staged table is incomplete")
+        val safeRelease = (summary.release ?: "unknown").replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, "timerroot-syms-$safeRelease.txt")
+            put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+        }
+        val uri = appContext.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IOException("cannot create download entry")
+        appContext.contentResolver.openOutputStream(uri)?.use { output ->
+            output.write(syms.readBytes())
+        } ?: throw IOException("cannot open download entry")
+        uri.toString()
     }
 
     override fun close() {

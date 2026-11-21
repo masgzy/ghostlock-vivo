@@ -41,11 +41,15 @@ interface GhostlockRepository {
 
     suspend fun listKsudLibraries(): List<com.ghostlock.app.domain.model.KsudLibraryEntry>
 
-    /** TimerRoot chain state: embedded/imported binary, staged ic-syms table. */
+    /** TimerRoot chain state: bundled/imported binary, staged ic-syms table. */
     suspend fun timerRootState(): com.ghostlock.app.domain.model.TimerRootState
 
     /** Imports a user-provided t98260 binary (SAF uri). Returns the stored name. */
     suspend fun importTimerRootBinary(uri: String): String?
+
+    /** Removes the imported t98260 binary; the run falls back to the bundled
+     * libtimerroot.so. No-op when nothing was imported. */
+    suspend fun removeTimerRootBinary()
 
     /** Parses an ic-syms table (CVE-2026-98260) from boot.img / OTA / URL. */
     suspend fun parseTimerRootSyms(
@@ -55,6 +59,10 @@ interface GhostlockRepository {
 
     /** Imports a ready-made ic-syms table (SAF uri). */
     suspend fun importTimerRootSyms(uri: String): String?
+
+    /** Publishes the staged ic-syms table into Download/ and returns the
+     * content uri (for sharing). Throws when no table is staged. */
+    suspend fun publishTimerRootSyms(): String
 
     /** IC_ALLOW_ANY_KERNEL for the TimerRoot chain (see TimerRootState). */
     fun timerRootAllowAnyKernel(): Boolean

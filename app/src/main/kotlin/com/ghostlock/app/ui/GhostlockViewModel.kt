@@ -49,7 +49,7 @@ private const val OverwriteSummaryLimit = 12
 
 enum class DocumentRequest {
     ImportOffsetsHocon, ImportOffsetsJson, BootImage, XblImage, PayloadImage, UefiImage,
-    VendorBootImage, TimerRootBinary, TimerRootSyms,
+    VendorBootImage, TimerRootBinary, TimerRootSyms, TimerRootOtaZip, TimerRootImage,
 }
 
 /** Options offered by [promptBootAttach], in display order. VENDOR_BOOT is
@@ -938,6 +938,28 @@ class GhostlockViewModel(
     }
 
     fun onParseTimerRootSyms(input: String) {
+        onParseTimerRootSymsInternal(input)
+    }
+
+    /** 98260 配置: parse a picked local image (full OTA zip / boot.img /
+     * payload.bin) into the staged table. The extractor sniffs the container
+     * itself, so one funnel covers all three. */
+    private fun parseTimerRootInput(uri: String, cacheName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val staged = runCatching { readDocumentUseCase.cache(uri, cacheName) }
+                .onFailure {
+                    appendLog("98260 parse error: ${it.message}")
+                    send(GhostlockEffect.Toast(R.string.timerroot_parse_failed))
+                }
+                .getOrNull()
+                ?: return@launch
+            appendLog("98260 source staged: $staged")
+            onParseTimerRootSymsInternal(staged)
+        }
+    }
+
+    /** Shared by the URL dialog action and the picked-file funnel. */
+    private fun onParseTimerRootSymsInternal(input: String) {
         if (!beginOperation()) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -956,13 +978,42 @@ class GhostlockViewModel(
         }
     }
 
+    /** Shares the staged table (98260 配置) as a Download/ file. */
+    fun onExportTimerRootSyms() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.publishTimerRootSyms() }
+                .onSuccess { uri ->
+                    appendLog("ic-syms: table exported")
+                    send(GhostlockEffect.Share(uri))
+                }
+                .onFailure {
+                    appendLog("ic-syms: export failed: ${it.message}")
+                    send(GhostlockEffect.Toast(R.string.timerroot_syms_missing))
+                }
+        }
+    }
+
+    /** Drops the imported binary; the run falls back to the bundled
+     * libtimerroot.so. */
+    fun onRemoveTimerRootBinary() {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.removeTimerRootBinary()
+            appendLog("t98260 import removed; falling back to the bundled library")
+            refreshTimerRootState()
+        }
+    }
+
     private suspend fun refreshTimerRootState() {
         runCatching { repository.timerRootState() }.onSuccess { state ->
             mutableState.update {
                 it.copy(
                     timerRootBinaryAvailable = state.binaryAvailable,
                     timerRootBinarySource = state.binarySource,
+                    timerRootBinarySize = state.binarySizeBytes,
                     timerRootSymsRelease = state.symsRelease,
+                    timerRootSymsSymbols = state.symsSymbols,
+                    timerRootSymsGeometryKeys = state.symsGeometryKeys,
+                    timerRootSymsGeometryEssential = state.symsGeometryEssential,
                     ksudSelectedEntry = state.ksudEntry,
                     timerRootAllowAnyKernel = state.allowAnyKernel,
                 )
@@ -1150,6 +1201,12 @@ class GhostlockViewModel(
     fun onPickTimerRootSyms() =
         send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootSyms))
 
+    fun onPickTimerRootOta() =
+        send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootOtaZip))
+
+    fun onPickTimerRootImage() =
+        send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootImage))
+
     fun parseOffsets() {
         parseDialogStage = ParseDialogStage.Mode
         mutableState.update {
@@ -1211,6 +1268,8 @@ class GhostlockViewModel(
             DocumentRequest.PayloadImage -> stagePayload(uri)
             DocumentRequest.TimerRootBinary -> onImportTimerRootBinary(uri)
             DocumentRequest.TimerRootSyms -> onImportTimerRootSyms(uri)
+            DocumentRequest.TimerRootOtaZip -> parseTimerRootInput(uri, "ota.zip")
+            DocumentRequest.TimerRootImage -> parseTimerRootInput(uri, "image.bin")
             DocumentRequest.ImportOffsetsHocon, DocumentRequest.ImportOffsetsJson -> Unit
         }
     }
@@ -1228,6 +1287,8 @@ class GhostlockViewModel(
             DocumentRequest.PayloadImage -> uris.firstOrNull()?.let(::stagePayload)
             DocumentRequest.TimerRootBinary -> uris.firstOrNull()?.let(::onImportTimerRootBinary)
             DocumentRequest.TimerRootSyms -> uris.firstOrNull()?.let(::onImportTimerRootSyms)
+            DocumentRequest.TimerRootOtaZip -> uris.firstOrNull()?.let { parseTimerRootInput(it, "ota.zip") }
+            DocumentRequest.TimerRootImage -> uris.firstOrNull()?.let { parseTimerRootInput(it, "image.bin") }
         }
     }
 

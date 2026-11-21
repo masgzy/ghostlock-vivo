@@ -384,9 +384,29 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
         }, "timerroot-runner").start()
     }
 
-    /** Embedded assets/t98260 first, then the user-pushed binary. */
+    /** Staging precedence, mirrored by timerRootState(): the user-pushed
+     * (imported) binary wins — an explicit choice — then the CI-built
+     * generic libtimerroot.so from the APK's jniLibs, then the legacy
+     * assets/t98260 dev asset. */
     private fun stageTimerRootBinary(work: File, callback: IGhostlockCallback): File {
         val target = File(work, "t98260")
+        val pushed = File(work, "t98260-user")
+        if (pushed.isFile && pushed.length() > 0) {
+            pushed.copyTo(target, overwrite = true)
+            target.setExecutable(true, false)
+            callback.onLog("<t> t98260: user-provided (${pushed.length()} bytes)")
+            return target
+        }
+        val library = File(context.applicationInfo.nativeLibraryDir, "libtimerroot.so")
+        if (library.isFile && library.length() > 0) {
+            library.copyTo(target, overwrite = true)
+            target.setExecutable(true, false)
+            callback.onLog(
+                "<t> t98260: bundled libtimerroot.so (${library.length()} bytes, " +
+                    "config-driven; kernel profile from the staged table)",
+            )
+            return target
+        }
         val fromAsset = runCatching {
             context.assets.open("t98260").use { input ->
                 FileOutputStream(target).use { output -> input.copyTo(output) }
@@ -398,16 +418,10 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
             callback.onLog("<t> t98260: embedded asset (${target.length()} bytes)")
             return target
         }
-        val pushed = File(work, "t98260-user")
-        if (pushed.isFile && pushed.length() > 0) {
-            pushed.copyTo(target, overwrite = true)
-            target.setExecutable(true, false)
-            callback.onLog("<t> t98260: user-provided (${pushed.length()} bytes)")
-            return target
-        }
         error(
-            "t98260 binary is missing: the APK was built without assets/t98260 and no " +
-                "user binary was imported. Import one in the TimerRoot config card first.",
+            "t98260 binary is missing: the APK bundles no libtimerroot.so, " +
+                "carries no assets/t98260 and no user binary was imported. " +
+                "Import one in the TimerRoot config screen first.",
         )
     }
 

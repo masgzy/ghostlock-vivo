@@ -176,6 +176,7 @@ tasks.matching { task ->
 }.configureEach {
     dependsOn(rootProject.tasks.named("prepareGhostlockJniLibs"))
     dependsOn(rootProject.tasks.named("prepareGhostlockExtractJniLibs"))
+    dependsOn(rootProject.tasks.named("prepareTimerRootJniLibs"))
 }
 
 dependencies {

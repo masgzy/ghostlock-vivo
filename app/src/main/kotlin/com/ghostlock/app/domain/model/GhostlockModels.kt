@@ -21,23 +21,73 @@ data class KsudLibraryEntry(
     val fileName: String get() = zipPath.substringAfterLast('/')
 }
 
-/** TimerRoot chain status shown by the config card. */
+/** TimerRoot chain status shown by the config screen. */
 data class TimerRootState(
     val chain: ExploitChain = ExploitChain.GHOSTLOCK,
-    /** t98260 available: embedded asset or user-imported binary. */
+    /** t98260 available: bundled libtimerroot.so, embedded asset or
+     * user-imported binary. */
     val binaryAvailable: Boolean = false,
     val binarySource: TimerRootBinarySource = TimerRootBinarySource.MISSING,
+    /** Size of the binary that will run, for the status line. */
+    val binarySizeBytes: Long = 0,
     /** ic-syms table staged for this kernel (null = none). */
     val symsRelease: String? = null,
+    /** Symbol/geometry stats of the staged table. */
+    val symsSymbols: Int = 0,
+    val symsGeometryKeys: Int = 0,
+    val symsGeometryEssential: Int = 0,
     /** User's explicit libksud.so choice inside the manager APK ("auto" = null). */
     val ksudEntry: String? = null,
     /** IC_ALLOW_ANY_KERNEL=1 for t98260: run an imported binary whose built-in
      * profile does not match this kernel, relying on the staged ic-syms table
      * for the slide. Only meaningful with a staged table. */
     val allowAnyKernel: Boolean = false,
-)
+) {
+    /** The staged table carries all 16 essential geometry keys, i.e. the
+     * generic bundled library can run table-driven on the table's kernel. */
+    val symsGeometryComplete: Boolean
+        get() = symsGeometryEssential >= TimerRootGeometry.ESSENTIAL_COUNT
+}
 
-enum class TimerRootBinarySource { MISSING, EMBEDDED, IMPORTED }
+enum class TimerRootBinarySource { MISSING, BUNDLED, EMBEDDED, IMPORTED }
+
+/** Geometry key set of the extended ic-syms table (the "98260 配置").
+ * Mirrors ic_geo_keys[] in third_party/timerroot/ic_syms.c
+ * (IC_GEOM_ESSENTIAL = 16) and collect_ic_geometry in
+ * tools/extract_rs/src/report.rs. */
+object TimerRootGeometry {
+    const val ESSENTIAL_COUNT = 16
+
+    val ESSENTIAL_KEYS: Set<String> = setOf(
+        "timer_alloc",
+        "cred_req",
+        "task_alloc_bytes",
+        "task_cred",
+        "cred_uid",
+        "cap_inh",
+        "cap_perm",
+        "cap_eff",
+        "cap_bset",
+        "cap_amb",
+        "cred_security",
+        "cred_user",
+        "cred_user_ns",
+        "cred_ucounts",
+        "cred_group_info",
+        "tp_funcs",
+    )
+
+    /** Essential + optional refinements the C loader recognizes. */
+    val KNOWN_KEYS: Set<String> = ESSENTIAL_KEYS + setOf(
+        "cred_alloc",
+        "timer_node_off",
+        "timer_site_low21",
+        "copy_process_low21",
+        "fullcap",
+        "selinux_blob_off",
+        "selinux_sid_kernel",
+    )
+}
 
 data class KernelSnapshot(
     val deviceName: String,
