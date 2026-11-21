@@ -46,6 +46,34 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
     private companion object {
         const val OffsetsFileName = "offsets.conf"
         const val LegacyOffsetsFileName = "offsets.json"
+
+        /** Staged image names: the native runtime reads these under
+         * GHOSTLOCK_HOME (= the app files dir). */
+        const val VendorBootFileName = "vendor_boot.img"
+        const val UefiFileName = "uefi.img"
+
+        /** A vendor_boot image is the only thing allowed under that name. */
+        const val VendorBootMagic = "VNDRBOOT"
+
+        /**
+         * Reads exactly [size] bytes, or null when the stream is shorter.
+         *
+         * A single `read()` is not guaranteed to fill the buffer — a
+         * ContentResolver or FileInputStream stream can return a short count
+         * on the first call — so checking one read's return value against the
+         * buffer size would reject perfectly valid images at random.
+         */
+        fun readExactHeader(stream: java.io.InputStream, size: Int): ByteArray? {
+            val header = ByteArray(size)
+            var filled = 0
+            while (filled < size) {
+                val read = stream.read(header, filled, size - filled)
+                if (read <= 0) return null
+                filled += read
+            }
+            return header
+        }
+
         const val UserProfilesDirectoryName = "user_profiles"
         const val EditSessionPreferences = "ghostlock_edit_session"
         const val ExtractBinaryName = "libextract.so"
@@ -344,10 +372,15 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
                 input.startsWith("https://", ignoreCase = true)
             var tempBoot: File? = null
             val effectiveInput = if (isRemoteUrl) {
+                /* 98260 consumes only the boot image: no vendor_boot pull (that
+                 * is the vivo vr.ko probe of the Ghostlock chain) and no extra
+                 * physical-load source, so the download stays minimal. */
                 val extracted = OtaPayloadExtractor.extractPartitions(
                     url = input,
                     workDir = filesDir,
                     onLog = onLog,
+                    wantVendorBoot = false,
+                    candidates = setOf("boot"),
                 )
                 tempBoot = extracted.bootFile
                 extracted.bootFile.absolutePath
@@ -605,6 +638,8 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         val parsedFile = File(filesDir, "offsets_parse.tmp")
         var tempBootFile: File? = null
         var tempXblFile: File? = null
+        var tempUefiFile: File? = null
+        var tempVendorBootFile: File? = null
         return try {
             if (overwrite) {
                 val pending = pendingParsedDocument
@@ -623,17 +658,45 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
              * going straight to the Rust extractor. */
             val isRemoteUrl = input.startsWith("http://", ignoreCase = true) ||
                 input.startsWith("https://", ignoreCase = true)
+            var effectiveUefiPath = uefiPath
             val (effectiveInput, effectiveXblPath) = if (isRemoteUrl) {
+                /* Pull only what this parse consumes: boot, plus vendor_boot on
+                 * a vivo/iQOO device (the runtime probe reads vr.ko out of it),
+                 * plus one physical-load source. */
                 val extracted = OtaPayloadExtractor.extractPartitions(
                     url = input,
                     workDir = filesDir,
                     onLog = onLog,
+                    wantVendorBoot = isVivoOrIqoo(),
                 )
                 tempBootFile = extracted.bootFile
                 tempXblFile = extracted.xblConfigFile
+                tempUefiFile = extracted.uefiFile
+                tempVendorBootFile = extracted.vendorBootFile
+                extracted.vendorBootFile?.let { vendorBoot ->
+                    if (stageVendorBootFile(vendorBoot, onLog)) {
+                        vendorBoot.delete()
+                        tempVendorBootFile = null
+                    }
+                }
+                /* The uefi image doubles as the runtime's physical-base witness,
+                 * so it is the one non-boot image kept on disk; xbl_config is
+                 * consumed by the extractor and removed in the cleanup below. */
+                if (extracted.uefiFile != null) {
+                    effectiveUefiPath = stageUefiFile(extracted.uefiFile, onLog)
+                        ?: extracted.uefiFile.absolutePath
+                }
                 Pair(extracted.bootFile.absolutePath, extracted.xblConfigFile?.absolutePath ?: xblPath)
             } else {
                 Pair(input, xblPath)
+            }
+
+            /* Before the offset work: a local payload/OTA zip carries
+             * vendor_boot, and the vivo/iQOO runtime probe needs it. Kept out
+             * of the offsets call so a dump failure can never be mistaken for
+             * a parse failure. */
+            if (!isRemoteUrl && isVivoOrIqoo()) {
+                dumpVendorBootFromPackage(binary, input, onLog)
             }
 
             parsedFile.delete()
@@ -643,9 +706,9 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
                     add("--xbl-config")
                     add(effectiveXblPath)
                 }
-                if (uefiPath != null) {
+                if (effectiveUefiPath != null) {
                     add("--uefi")
-                    add(uefiPath)
+                    add(effectiveUefiPath)
                 }
                 if (vendorBootPath != null) {
                     add("--vendor-boot")
@@ -694,6 +757,151 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             parsedFile.delete()
             tempBootFile?.delete()
             tempXblFile?.delete()
+            tempUefiFile?.delete()
+            tempVendorBootFile?.delete()
+            sweepStaleExtractionTemps()
+        }
+    }
+
+    /**
+     * Removes staging the parse no longer needs: timestamped partition files
+     * from earlier runs (including ones interrupted before their own cleanup)
+     * and the extractor's payload/dump work directories. The images the
+     * runtime reads — `vendor_boot.img` and `uefi.img` — are deliberately kept.
+     */
+    private fun sweepStaleExtractionTemps() {
+        val keep = setOf(VendorBootFileName, UefiFileName)
+        runCatching {
+            filesDir.listFiles()?.forEach { entry ->
+                val name = entry.name
+                when {
+                    name.startsWith("ghostlock_ota_") -> entry.delete()
+                    name.startsWith("ghostlock-payload-") ||
+                        name.startsWith("ghostlock-dump-") -> entry.deleteRecursively()
+                    name == "offsets_parse.tmp" -> entry.delete()
+                    name in keep -> Unit
+                }
+            }
+        }
+    }
+
+    /**
+     * Stages [source] as `filesDir/vendor_boot.img` after re-checking the
+     * vendor_boot magic — the file name the native runtime looks for. Returns
+     * false (and stages nothing) for any other image, so a boot.img picked by
+     * mistake never masquerades as vendor_boot.
+     */
+    private fun stageVendorBootFile(source: File, onLog: (String) -> Unit): Boolean {
+        val looksRight = runCatching {
+            source.inputStream().use { input ->
+                val header = readExactHeader(input, VendorBootMagic.length) ?: return@runCatching false
+                String(header, Charsets.US_ASCII) == VendorBootMagic
+            }
+        }.getOrDefault(false)
+        if (!looksRight) {
+            onLog("vendor_boot: rejected ${source.name} (magic mismatch)")
+            return false
+        }
+        return runCatching {
+            source.copyTo(File(filesDir, VendorBootFileName), overwrite = true)
+            onLog("vendor_boot: staged -> $VendorBootFileName (runtime vr.ko probe)")
+            true
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Stages [source] as `filesDir/uefi.img`, the path the native runtime reads
+     * when it cross-checks the profile's physical load base. A PE image starts
+     * with `MZ`; anything else is left un-staged (and the caller falls back to
+     * the temporary path for this parse).
+     */
+    private fun stageUefiFile(source: File, onLog: (String) -> Unit): String? {
+        val looksRight = runCatching {
+            source.inputStream().use { input ->
+                val header = readExactHeader(input, 2) ?: return@runCatching false
+                header[0] == 'M'.code.toByte() && header[1] == 'Z'.code.toByte()
+            }
+        }.getOrDefault(false)
+        if (!looksRight) {
+            onLog("uefi: not a PE image, keeping it only for this parse")
+            return null
+        }
+        return runCatching {
+            val target = File(filesDir, UefiFileName)
+            source.copyTo(target, overwrite = true)
+            onLog("uefi: staged -> $UefiFileName")
+            target.absolutePath
+        }.getOrNull()
+    }
+
+    /**
+     * Pulls `vendor_boot` out of a local payload.bin / OTA zip through the
+     * extractor's `--dump-partition` and stages it for the runtime.
+     *
+     * Best effort by design: only vivo/iQOO devices use the module, packages
+     * without the partition are normal, and every failure path is logged and
+     * ignored so the offsets parse is never affected.
+     */
+    private suspend fun dumpVendorBootFromPackage(
+        binary: File,
+        input: String,
+        onLog: (String) -> Unit,
+    ) {
+        val head = runCatching {
+            val file = File(input)
+            if (!file.isFile) return@runCatching null
+            file.inputStream().use { stream -> readExactHeader(stream, 4) }
+        }.getOrNull() ?: return
+        /* Same gate as the extractor's own payload detection: CrAU or a zip. */
+        val isPayload = head.contentEquals(byteArrayOf(0x43, 0x72, 0x41, 0x55)) ||
+            head.contentEquals(byteArrayOf(0x50, 0x4B, 0x03, 0x04))
+        if (!isPayload) return
+
+        val target = File(filesDir, VendorBootFileName)
+        onLog("<k> vendor_boot: extracting from the package")
+        val code = runCatching {
+            runProcess(
+                ProcessBuilder(
+                    listOf(
+                        binary.absolutePath, input,
+                        "--dump-partition", "vendor_boot",
+                        "--dump-out", target.absolutePath,
+                        "--dump-only",
+                        "--work-dir", filesDir.absolutePath,
+                    ),
+                ).directory(filesDir).redirectErrorStream(true).apply {
+                    environment()["GHOSTLOCK_HOME"] = filesDir.absolutePath
+                    environment()["TMPDIR"] = filesDir.absolutePath
+                    environment()["HOME"] = filesDir.absolutePath
+                },
+                onLog = onLog,
+                timeoutSeconds = 600,
+            )
+        }.getOrNull()
+        if (code != 0) {
+            /* Normal for packages without the partition; the native probe
+             * simply stays on its built-in defaults. */
+            onLog("vendor_boot: not available from this package (exit=$code)")
+            target.delete()
+            return
+        }
+        if (!stageVendorBootFile(target, onLog)) target.delete()
+    }
+
+    private fun isVivoOrIqoo(): Boolean {
+        val identity = listOf(Build.MANUFACTURER, Build.BRAND).joinToString(" ")
+            .lowercase(Locale.ROOT)
+        return identity.contains("vivo") || identity.contains("iqoo")
+    }
+
+    override fun stagedImagePath(fileName: String): String? {
+        val target = File(filesDir, fileName)
+        return target.absolutePath.takeIf { target.isFile && target.length() > 0L }
+    }
+
+    override fun stageVendorBootImage(sourcePath: String) {
+        runCatching {
+            File(sourcePath).copyTo(File(filesDir, VendorBootFileName), overwrite = true)
         }
     }
 
@@ -1167,6 +1375,32 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             output.write(candidate.document.toByteArray(StandardCharsets.UTF_8))
         } ?: throw IOException("cannot open download entry")
         return uri.toString()
+    }
+
+    override suspend fun readTimerRootSyms(): String? = withContext(Dispatchers.IO) {
+        val syms = File(filesDir, TIMER_ROOT_SYMS)
+        if (!syms.isFile) return@withContext null
+        runCatching { syms.readText() }.getOrNull()
+    }
+
+    override suspend fun writeTimerRootSyms(text: String): Boolean = withContext(Dispatchers.IO) {
+        val syms = File(filesDir, TIMER_ROOT_SYMS)
+        if (!syms.isFile) return@withContext false
+        /* Atomic-ish: stage the edit, then rename over the live table so a
+         * crash mid-write can never leave a half table behind. */
+        val staged = File(filesDir, "$TIMER_ROOT_SYMS.edit")
+        try {
+            staged.writeText(text)
+            if (!staged.renameTo(syms)) {
+                syms.delete()
+                staged.copyTo(syms, overwrite = true)
+            }
+            true
+        } catch (error: IOException) {
+            false
+        } finally {
+            staged.delete()
+        }
     }
 
     override suspend fun publishTimerRootSyms(): String = withContext(Dispatchers.IO) {

@@ -179,11 +179,9 @@ Substituí-los pelos novos valores?"</string>
 <string name="overwrite_yes">Substituir</string>
 <string name="parameters">Configuração de parâmetros</string>
 <string name="parameters_summary">Carregar configuração e substituições de parâmetros</string>
-<string name="parse_attach_none">Analisar diretamente (sem anexo)</string>
 <string name="parse_attach_uefi">Anexe uefi.img</string>
 <string name="parse_attach_vendor_boot">Anexe vendor_boot.img (somente MediaTek)</string>
 <string name="parse_attach_xbl">Anexe xbl_config.img</string>
-<string name="parse_attach_xbl_uefi">Anexe xbl_config.img + uefi.img</string>
 <string name="parse_boot_attach_title">Anexe xbl_config.img / uefi.img (opcional)</string>
 <string name="parse_failed">Falha na análise</string>
 <string name="parse_failed_fixed">Este kernel já corrigiu a vulnerabilidade</string>

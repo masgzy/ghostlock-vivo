@@ -28,10 +28,8 @@
     <string name="parse_option_payload">payload.bin</string>
     <string name="parse_option_boot">boot.img</string>
     <string name="parse_boot_attach_title">إضافة xbl_config.img / uefi.img (اختياري)</string>
-    <string name="parse_attach_none">تحليل مباشر (من دون إضافة ملفات)</string>
     <string name="parse_attach_xbl">إضافة xbl_config.img</string>
     <string name="parse_attach_uefi">إضافة uefi.img</string>
-    <string name="parse_attach_xbl_uefi">إضافة xbl_config.img وuefi.img</string>
     <string name="parse_attach_vendor_boot">إضافة vendor_boot.img (لأجهزة MediaTek فقط)</string>
     <string name="parse_url_title">رابط الحزمة الكاملة</string>
     <string name="parse_url_hint">الصق رابط ملف OTA الكامل</string>

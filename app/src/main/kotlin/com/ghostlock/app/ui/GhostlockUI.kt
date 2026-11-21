@@ -189,6 +189,15 @@ data class GhostlockUiState(
     val ksudSelectedEntry: String? = null,
     /** TimerRoot (98260) config screen. */
     val timerRootConfigVisible: Boolean = false,
+    /** TimerRoot 配置 → 加载配置 子页。 */
+    val timerRootLoadConfigVisible: Boolean = false,
+    /** TimerRoot 配置 → 编辑配置 子页。 */
+    val timerRootEditVisible: Boolean = false,
+    /** TimerRoot 配置 → 配置文档 子页（占位）。 */
+    val timerRootDocsVisible: Boolean = false,
+    /** 编辑配置页的字段（off.* 几何与硬目标）。 */
+    val timerRootEditFields: List<TimerRootSymsField> = emptyList(),
+    val timerRootEditDirty: Boolean = false,
     val timerRootBinaryAvailable: Boolean = false,
     val timerRootBinarySource: TimerRootBinarySource = TimerRootBinarySource.MISSING,
     val timerRootBinarySize: Long = 0,
@@ -202,9 +211,19 @@ data class GhostlockUiState(
     val launchManagerOnSuccess: Boolean = true,
 )
 
-enum class DialogType { NONE, LIST, INPUT, CONFIRM, NOTICE }
+enum class DialogType { NONE, LIST, INPUT, CONFIRM, NOTICE, VENDOR_BOOT }
 
 data class GhostlockLogLine(val text: String, val color: Int)
+
+/** One editable line of the staged ic-syms table (编辑配置页). */
+data class TimerRootSymsField(
+    val key: String,
+    /** Field label shown to the user (off.xxx 或符号名)。 */
+    val label: String,
+    val value: String,
+    /** true = off.* geometry; false = the hard target symbol. */
+    val isGeometry: Boolean,
+)
 
 interface GhostlockActions {
     fun onRun()
@@ -230,6 +249,15 @@ interface GhostlockActions {
     fun onKsudLibrarySelected(entry: String?)
     fun onOpenTimerRootConfig()
     fun onCloseTimerRootConfig()
+    fun onOpenTimerRootLoadConfig()
+    fun onCloseTimerRootLoadConfig()
+    fun onOpenTimerRootEdit()
+    fun onCloseTimerRootEdit()
+    fun onTimerRootFieldChanged(index: Int, value: String)
+    fun onSaveTimerRootEdits()
+    fun onRevertTimerRootEdits()
+    fun onOpenTimerRootDocs()
+    fun onCloseTimerRootDocs()
     fun onPickTimerRootBinary()
     fun onPickTimerRootSyms()
     fun onPickTimerRootOta()
@@ -242,6 +270,9 @@ interface GhostlockActions {
     fun onSetLaunchManagerOnSuccess(enabled: Boolean)
     fun onParseTimerRootSyms(input: String)
     fun onDialogItemSelected(index: Int)
+
+    /** Confirm button of the vivo/iQOO vendor_boot prompt: open the picker. */
+    fun onVendorBootImport()
     fun onDialogInputChange(value: String)
     fun onDialogConfirm(value: String)
     fun onDialogDismiss()
@@ -299,6 +330,9 @@ internal sealed interface GhostlockScreen : NavKey {
     data object ProfileOverride : GhostlockScreen
     data object AdvancedOverride : GhostlockScreen
     data object TimerRootConfig : GhostlockScreen
+    data object TimerRootLoadConfig : GhostlockScreen
+    data object TimerRootEdit : GhostlockScreen
+    data object TimerRootDocs : GhostlockScreen
 }
 
 internal fun navigationPath(state: GhostlockUiState): List<GhostlockScreen> {
@@ -308,6 +342,9 @@ internal fun navigationPath(state: GhostlockUiState): List<GhostlockScreen> {
      * 参数配置); the same flag drives both. */
     if (state.timerRootConfigVisible && !state.advancedScreenVisible) {
         path += GhostlockScreen.TimerRootConfig
+        if (state.timerRootLoadConfigVisible) path += GhostlockScreen.TimerRootLoadConfig
+        if (state.timerRootEditVisible) path += GhostlockScreen.TimerRootEdit
+        if (state.timerRootDocsVisible) path += GhostlockScreen.TimerRootDocs
         return path
     }
     if (!state.advancedScreenVisible) return path
@@ -318,6 +355,9 @@ internal fun navigationPath(state: GhostlockUiState): List<GhostlockScreen> {
     }
     if (state.timerRootConfigVisible) {
         path += GhostlockScreen.TimerRootConfig
+        if (state.timerRootLoadConfigVisible) path += GhostlockScreen.TimerRootLoadConfig
+        if (state.timerRootEditVisible) path += GhostlockScreen.TimerRootEdit
+        if (state.timerRootDocsVisible) path += GhostlockScreen.TimerRootDocs
         return path
     }
     if (!state.parametersVisible) return path
@@ -360,6 +400,9 @@ private fun closeScreen(screen: GhostlockScreen, actions: GhostlockActions) {
         GhostlockScreen.ProfileOverride -> actions.onCloseProfileOverrides()
         GhostlockScreen.AdvancedOverride -> actions.onCloseAdvancedOverrides()
         GhostlockScreen.TimerRootConfig -> actions.onCloseTimerRootConfig()
+        GhostlockScreen.TimerRootLoadConfig -> actions.onCloseTimerRootLoadConfig()
+        GhostlockScreen.TimerRootEdit -> actions.onCloseTimerRootEdit()
+        GhostlockScreen.TimerRootDocs -> actions.onCloseTimerRootDocs()
     }
 }
 
@@ -435,6 +478,15 @@ internal fun GhostlockApp(
                     }
                     entry<GhostlockScreen.TimerRootConfig>(swipeDismiss = swipeBack) {
                         TimerRootConfigScreen(state = state, actions = actions)
+                    }
+                    entry<GhostlockScreen.TimerRootLoadConfig>(swipeDismiss = swipeBack) {
+                        TimerRootLoadConfigScreen(state = state, actions = actions)
+                    }
+                    entry<GhostlockScreen.TimerRootEdit>(swipeDismiss = swipeBack) {
+                        TimerRootEditScreen(state = state, actions = actions)
+                    }
+                    entry<GhostlockScreen.TimerRootDocs>(swipeDismiss = swipeBack) {
+                        TimerRootDocsScreen(onBack = actions::onCloseTimerRootDocs)
                     }
                 }
                 GhostlockDialog(state = state, actions = actions)
@@ -800,6 +852,35 @@ private fun GhostlockDialog(
                     }
                 }
 
+                DialogType.VENDOR_BOOT -> {
+                    Text(
+                        text = stringResource(state.dialogMessageRes),
+                        modifier = Modifier.fillMaxWidth(),
+                        style = MiuixTheme.textStyles.body2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                    /* Import carries the accent colour so it reads as the
+                     * suggested action; cancel stays plain. */
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 16.dp),
+                    ) {
+                        TextButton(
+                            modifier = Modifier.weight(1f),
+                            text = stringResource(state.dialogConfirmLabelRes),
+                            colors = ButtonDefaults.textButtonColorsPrimary(),
+                            onClick = actions::onVendorBootImport,
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        TextButton(
+                            modifier = Modifier.weight(1f),
+                            text = stringResource(R.string.vivo_vendor_boot_cancel),
+                            onClick = actions::onDialogDismiss,
+                        )
+                    }
+                }
+
                 DialogType.NONE -> Unit
             }
         },
@@ -886,12 +967,31 @@ private fun ControlPanel(
 ) {
     Column(modifier = modifier) {
         ActivationStatusCard(
-            supported = state.kernelSupported,
-            profileAvailable = state.executionHasProfile,
-            profileValid = state.profileInvalidPaths.isEmpty(),
+            /* Chain-aware: with TimerRoot selected the card reports and opens
+             * the 98260 configuration instead of the Ghostlock profile flow. */
+            supported = if (state.exploitChain == ExploitChain.TIMER_ROOT) {
+                state.timerRootBinaryAvailable
+            } else {
+                state.kernelSupported
+            },
+            profileAvailable = if (state.exploitChain == ExploitChain.TIMER_ROOT) {
+                state.timerRootSymsRelease != null
+            } else {
+                state.executionHasProfile
+            },
+            profileValid = if (state.exploitChain == ExploitChain.TIMER_ROOT) {
+                true
+            } else {
+                state.profileInvalidPaths.isEmpty()
+            },
             shizukuEnabled = state.shizukuEnabled,
             shizukuStatus = state.shizukuStatus,
-            onParametersClick = actions::onOpenParameters,
+            timerRootChain = state.exploitChain == ExploitChain.TIMER_ROOT,
+            onParametersClick = if (state.exploitChain == ExploitChain.TIMER_ROOT) {
+                actions::onOpenTimerRootConfig
+            } else {
+                actions::onOpenParameters
+            },
             onShizukuClick = actions::onStatusClick,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -1014,6 +1114,7 @@ private fun ActivationStatusCard(
     profileValid: Boolean,
     shizukuEnabled: Boolean,
     shizukuStatus: ShizukuStatus,
+    timerRootChain: Boolean = false,
     onParametersClick: () -> Unit,
     onShizukuClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1028,13 +1129,17 @@ private fun ActivationStatusCard(
                 isSystemInDarkTheme() -> Color(0xFF1A3825)
                 else -> Color(0xFFDFFAE4)
             },
-            R.string.kernel_supported,
+            if (timerRootChain) R.string.timerroot_status_ready_title else R.string.kernel_supported,
             Icons.Rounded.CheckCircleOutline,
         )
 
         missing -> Triple(
             MiuixTheme.colorScheme.errorContainer,
-            if (!supported) R.string.kernel_unsupported else R.string.kernel_profile_required,
+            when {
+                timerRootChain -> R.string.timerroot_status_missing_title
+                !supported -> R.string.kernel_unsupported
+                else -> R.string.kernel_profile_required
+            },
             Icons.Rounded.RemoveCircleOutline,
         )
 
@@ -1049,6 +1154,16 @@ private fun ActivationStatusCard(
         )
     }
     val summary = when {
+        /* TimerRoot chain: the two staging states have their own actionable
+         * texts; Shizuku is mandatory for 98260, so its gate stays. */
+        timerRootChain && !supported -> R.string.timerroot_config_missing_binary
+        timerRootChain && !profileAvailable -> R.string.timerroot_config_no_syms
+        timerRootChain && !accessReady -> when (shizukuStatus) {
+            ShizukuStatus.PERMISSION_REQUIRED -> R.string.shizuku_status_permission_required
+            else -> R.string.shizuku_status_not_running
+        }
+
+        timerRootChain -> R.string.timerroot_config_ready
         ready && shizukuEnabled -> R.string.kernel_profile_ready_shizuku
         ready -> R.string.kernel_profile_ready
         !supported -> R.string.kernel_unsupported_summary

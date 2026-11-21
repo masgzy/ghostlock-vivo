@@ -99,7 +99,7 @@ private fun ProfileDocsCard(onOpen: () -> Unit) {
 }
 
 @Composable
-private fun ProfileHintBanner(
+internal fun ProfileHintBanner(
     text: String,
     modifier: Modifier = Modifier,
     warning: Boolean = false,

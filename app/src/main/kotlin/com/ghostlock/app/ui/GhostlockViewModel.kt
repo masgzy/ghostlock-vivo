@@ -5,6 +5,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ghostlock.app.R
+import com.ghostlock.app.data.TimerRootTable
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.ExploitChain
 import com.ghostlock.app.domain.model.KernelSnapshot
@@ -14,6 +15,7 @@ import com.ghostlock.app.domain.model.ParseResult
 import com.ghostlock.app.domain.model.ProfileConfig
 import com.ghostlock.app.domain.model.ProfileFieldNode
 import com.ghostlock.app.domain.model.ShizukuStatus
+import com.ghostlock.app.domain.model.TimerRootGeometry
 import com.ghostlock.app.domain.repository.GhostlockRepository
 import com.ghostlock.app.domain.repository.ProfileConfigController
 import com.ghostlock.app.domain.usecase.FormatLogUseCase
@@ -52,9 +54,11 @@ enum class DocumentRequest {
     VendorBootImage, TimerRootBinary, TimerRootSyms, TimerRootOtaZip, TimerRootImage,
 }
 
-/** Options offered by [promptBootAttach], in display order. VENDOR_BOOT is
- * only ever added to that list for MediaTek devices */
-private enum class AttachOption { NONE, XBL, UEFI, XBL_UEFI, VENDOR_BOOT }
+/** Options offered by the attachment step, in display order. The step is a
+ * loop: every attached image returns to it, and its first item runs the parse
+ * with whatever is staged. VENDOR_BOOT serves both the MediaTek physical-base
+ * path and the vivo/iQOO vr.ko probe. */
+private enum class AttachOption { START, XBL, UEFI, VENDOR_BOOT }
 
 private enum class ParseDialogStage { Mode, Attach }
 
@@ -78,15 +82,17 @@ class GhostlockViewModel(
     val effects = effectChannel.receiveAsFlow()
 
     private var kernelSnapshot: KernelSnapshot? = null
-    private var pendingParseWithXbl = false
-    private var pendingParseWithUefi = false
-    private var pendingParseWithVendorBoot = false
     private var pendingBootPath: String? = null
+    private var pendingPayloadPath: String? = null
+    private var pendingUrl: String? = null
     private var pendingXblPath: String? = null
     private var pendingUefiPath: String? = null
     private var pendingVendorBootPath: String? = null
     private var pendingAttachOptions: List<AttachOption> = emptyList()
     private var parseDialogStage = ParseDialogStage.Mode
+    /* Queued vendor_boot request, shown once the current dialog closes. */
+    private var vendorBootPromptPending = false
+    private var vendorBootImported = false
     private var pendingConfirmation: PendingConfirmation? = null
 
     fun initialize() {
@@ -1170,12 +1176,128 @@ class GhostlockViewModel(
     }
 
     fun onOpenTimerRootConfig() {
-        mutableState.update { it.copy(timerRootConfigVisible = true) }
+        mutableState.update {
+            it.copy(
+                timerRootConfigVisible = true,
+                timerRootLoadConfigVisible = false,
+                timerRootEditVisible = false,
+                timerRootDocsVisible = false,
+            )
+        }
         viewModelScope.launch(Dispatchers.IO) { refreshTimerRootState() }
     }
 
     fun onCloseTimerRootConfig() {
-        mutableState.update { it.copy(timerRootConfigVisible = false) }
+        mutableState.update {
+            it.copy(
+                timerRootConfigVisible = false,
+                timerRootLoadConfigVisible = false,
+                timerRootEditVisible = false,
+                timerRootDocsVisible = false,
+            )
+        }
+    }
+
+    /* ---- TimerRoot 配置的多级页 ---- */
+
+    fun onOpenTimerRootLoadConfig() {
+        mutableState.update { it.copy(timerRootLoadConfigVisible = true) }
+        viewModelScope.launch(Dispatchers.IO) { refreshTimerRootState() }
+    }
+
+    fun onCloseTimerRootLoadConfig() {
+        mutableState.update { it.copy(timerRootLoadConfigVisible = false) }
+    }
+
+    fun onOpenTimerRootDocs() {
+        mutableState.update { it.copy(timerRootDocsVisible = true) }
+    }
+
+    fun onCloseTimerRootDocs() {
+        mutableState.update { it.copy(timerRootDocsVisible = false) }
+    }
+
+    /**
+     * Loads the staged ic-syms table into the edit fields. Only the `off.*`
+     * geometry block and the hard target symbol are editable — the rest of the
+     * table is preserved verbatim on save.
+     */
+    fun onOpenTimerRootEdit() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = runCatching { repository.readTimerRootSyms() }.getOrNull()
+            if (text == null) {
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_no_table))
+                return@launch
+            }
+            val fields = timerRootEditFieldsOf(text)
+            mutableState.update {
+                it.copy(
+                    timerRootEditVisible = true,
+                    timerRootEditFields = fields,
+                    timerRootEditDirty = false,
+                )
+            }
+        }
+    }
+
+    fun onCloseTimerRootEdit() {
+        mutableState.update { it.copy(timerRootEditVisible = false) }
+    }
+
+    fun onTimerRootFieldChanged(index: Int, value: String) {
+        mutableState.update { current ->
+            val fields = current.timerRootEditFields.toMutableList()
+            if (index in fields.indices) {
+                fields[index] = fields[index].copy(value = value)
+            }
+            current.copy(timerRootEditFields = fields, timerRootEditDirty = true)
+        }
+    }
+
+    /** Saves the edited fields back into the staged table. */
+    fun onSaveTimerRootEdits() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = runCatching { repository.readTimerRootSyms() }.getOrNull()
+            if (text == null) {
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_no_table))
+                return@launch
+            }
+            val edited = applyTimerRootEdits(text, state.value.timerRootEditFields)
+            /* Gate the write on the hard target: a table whose
+             * __tracepoint_sys_exit no longer parses is refused, not saved. */
+            val summary = TimerRootTable.summarize(edited)
+            if (!summary.hasTracepointTarget) {
+                appendLog("timerroot edit rejected: no __tracepoint_sys_exit value")
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_invalid))
+                return@launch
+            }
+            val ok = repository.writeTimerRootSyms(edited)
+            if (ok) {
+                appendLog("ic-syms table edited (${state.value.timerRootEditFields.size} fields)")
+                refreshTimerRootState()
+                mutableState.update { it.copy(timerRootEditDirty = false) }
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_saved))
+            } else {
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_invalid))
+            }
+        }
+    }
+
+    /** Reloads the edit fields from the staged table, discarding changes. */
+    fun onRevertTimerRootEdits() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = runCatching { repository.readTimerRootSyms() }.getOrNull()
+            if (text == null) {
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_no_table))
+                return@launch
+            }
+            mutableState.update {
+                it.copy(
+                    timerRootEditFields = timerRootEditFieldsOf(text),
+                    timerRootEditDirty = false,
+                )
+            }
+        }
     }
 
     fun onCloseExecutionSheet() {
@@ -1223,16 +1345,26 @@ class GhostlockViewModel(
         }
     }
 
-    /** boot.img was chosen: let the user attach xbl_config / uefi (optional),
-     * or, on a MediaTek device, a vendor_boot.img instead */
-    private fun promptBootAttach() {
+    /** Attachment step: shown once a source is staged and re-shown after every
+     * extra image, so any combination is reachable without one entry per
+     * combination. vendor_boot.img belongs here: on MediaTek it supplies
+     * kernel_phys_load, and on vivo/iQOO it carries the vr.ko module the
+     * runtime probe reads. */
+    private fun promptAttach() {
         parseDialogStage = ParseDialogStage.Attach
         val options = buildList {
-            add(AttachOption.NONE to R.string.parse_attach_none)
+            add(AttachOption.START to R.string.parse_attach_start)
             add(AttachOption.XBL to R.string.parse_attach_xbl)
             add(AttachOption.UEFI to R.string.parse_attach_uefi)
-            add(AttachOption.XBL_UEFI to R.string.parse_attach_xbl_uefi)
-            if (isMediaTek()) add(AttachOption.VENDOR_BOOT to R.string.parse_attach_vendor_boot)
+            /* Already staged: say so, so "nothing happened" cannot be the
+             * user's only signal that the import worked. */
+            add(
+                AttachOption.VENDOR_BOOT to if (vendorBootImported || stagedVendorBoot() != null) {
+                    R.string.parse_attach_vendor_boot_staged
+                } else {
+                    R.string.parse_attach_vendor_boot
+                },
+            )
         }
         pendingAttachOptions = options.map { it.first }
         mutableState.update {
@@ -1297,15 +1429,15 @@ class GhostlockViewModel(
         when (parseDialogStage) {
             ParseDialogStage.Mode -> when (index) {
                 0 -> pickPayload()
-                1 -> promptBootAttach()
+                1 -> pickBoot()
             }
 
             ParseDialogStage.Attach -> when (pendingAttachOptions.getOrNull(index)) {
-                AttachOption.NONE -> pickBoot(withXbl = false, withUefi = false, withVendorBoot = false)
-                AttachOption.XBL -> pickBoot(withXbl = true, withUefi = false, withVendorBoot = false)
-                AttachOption.UEFI -> pickBoot(withXbl = false, withUefi = true, withVendorBoot = false)
-                AttachOption.XBL_UEFI -> pickBoot(withXbl = true, withUefi = true, withVendorBoot = false)
-                AttachOption.VENDOR_BOOT -> pickBoot(withXbl = false, withUefi = false, withVendorBoot = true)
+                /* Start, or attach one more image and come straight back here. */
+                AttachOption.START -> startPendingParse()
+                AttachOption.XBL -> send(GhostlockEffect.PickDocument(DocumentRequest.XblImage))
+                AttachOption.UEFI -> send(GhostlockEffect.PickDocument(DocumentRequest.UefiImage))
+                AttachOption.VENDOR_BOOT -> onVendorBootImport()
                 null -> Unit
             }
         }
@@ -1330,6 +1462,10 @@ class GhostlockViewModel(
     fun onDialogDismissFinished() {
         if (!state.value.dialogVisible) {
             clearDialog()
+            if (vendorBootPromptPending) {
+                vendorBootPromptPending = false
+                promptVendorBootIfNeeded()
+            }
         }
     }
 
@@ -1437,21 +1573,53 @@ class GhostlockViewModel(
     }
 
     private fun pickPayload() {
-        pendingParseWithXbl = false
-        pendingParseWithUefi = false
+        pendingPayloadPath = null
+        pendingXblPath = null
+        pendingUefiPath = null
         send(GhostlockEffect.Toast(R.string.parse_pick_payload_hint))
         send(GhostlockEffect.PickDocument(DocumentRequest.PayloadImage))
     }
 
-    private fun pickBoot(withXbl: Boolean, withUefi: Boolean, withVendorBoot: Boolean = false) {
-        pendingParseWithXbl = withXbl
-        pendingParseWithUefi = withUefi
-        pendingParseWithVendorBoot = withVendorBoot
+    private fun pickBoot() {
+        pendingBootPath = null
+        pendingXblPath = null
+        pendingUefiPath = null
+        send(GhostlockEffect.PickDocument(DocumentRequest.BootImage))
+    }
+
+    /**
+     * Runs the parse for whichever source was staged, with whatever images the
+     * user attached in the loop. Called by the attachment step's first item, so
+     * starting a parse is the same action on every path. A staged vendor_boot
+     * is passed through for the MediaTek physical-base path; on vivo/iQOO it
+     * was already copied to its staged name and the runtime reads that.
+     */
+    private fun startPendingParse() {
+        parseDialogStage = ParseDialogStage.Mode
+        val boot = pendingBootPath
+        val payload = pendingPayloadPath
+        val url = pendingUrl
+        val xbl = pendingXblPath
+        val uefi = pendingUefiPath
+        val vendorBoot = pendingVendorBootPath
+        pendingBootPath = null
+        pendingPayloadPath = null
+        pendingUrl = null
         pendingXblPath = null
         pendingUefiPath = null
         pendingVendorBootPath = null
-        if (withXbl) send(GhostlockEffect.Toast(R.string.parse_pick_boot_hint))
-        send(GhostlockEffect.PickDocument(DocumentRequest.BootImage))
+        when {
+            url != null -> parseUrl(url, xbl, uefi)
+            payload != null -> viewModelScope.launch(Dispatchers.IO) {
+                runParse(payload, xblPath = xbl, uefiPath = uefi, vendorBootPath = vendorBoot)
+            }
+
+            boot != null -> viewModelScope.launch(Dispatchers.IO) {
+                runParse(boot, xblPath = xbl, uefiPath = uefi, vendorBootPath = vendorBoot)
+            }
+
+            else -> Unit
+        }
     }
 
     private fun stageBoot(uri: String) {
@@ -1459,25 +1627,12 @@ class GhostlockViewModel(
             try {
                 val bootPath = readDocumentUseCase.cache(uri, "boot.img")
                 pendingBootPath = bootPath
+                pendingPayloadPath = null
+                pendingUrl = null
                 appendLog("boot.img ready: $bootPath")
-                when {
-                    pendingParseWithXbl -> {
-                        send(GhostlockEffect.Toast(R.string.parse_pick_xbl_hint))
-                        send(GhostlockEffect.PickDocument(DocumentRequest.XblImage))
-                    }
-
-                    pendingParseWithUefi -> {
-                        send(GhostlockEffect.Toast(R.string.parse_pick_uefi_hint))
-                        send(GhostlockEffect.PickDocument(DocumentRequest.UefiImage))
-                    }
-
-                    pendingParseWithVendorBoot -> {
-                        send(GhostlockEffect.Toast(R.string.parse_pick_vendor_boot_hint))
-                        send(GhostlockEffect.PickDocument(DocumentRequest.VendorBootImage))
-                    }
-
-                    else -> runParse(bootPath)
-                }
+                /* Ask about attachments before parsing: this is where
+                 * vendor_boot.img, xbl_config.img and uefi.img are offered. */
+                promptAttach()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -1491,16 +1646,10 @@ class GhostlockViewModel(
     private fun stageXbl(uri: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val bootPath = requireNotNull(pendingBootPath) { "boot.img is not staged" }
                 val xblPath = readDocumentUseCase.cache(uri, "xbl_config.img")
                 pendingXblPath = xblPath
                 appendLog("xbl_config.img ready: $xblPath")
-                if (pendingParseWithUefi) {
-                    send(GhostlockEffect.Toast(R.string.parse_pick_uefi_hint))
-                    send(GhostlockEffect.PickDocument(DocumentRequest.UefiImage))
-                } else {
-                    runParse(bootPath, xblPath = xblPath)
-                }
+                promptAttach()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -1514,11 +1663,10 @@ class GhostlockViewModel(
     private fun stageUefi(uri: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val bootPath = requireNotNull(pendingBootPath) { "boot.img is not staged" }
                 val uefiPath = readDocumentUseCase.cache(uri, "uefi.img")
                 pendingUefiPath = uefiPath
                 appendLog("uefi.img ready: $uefiPath")
-                runParse(bootPath, xblPath = pendingXblPath, uefiPath = uefiPath)
+                promptAttach()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -1529,21 +1677,72 @@ class GhostlockViewModel(
         }
     }
 
-    /** vendor_boot.img was chosen (MediaTek only): parses boot.img + this
-     * directly, no xbl_config/uefi/root needed. */
+    private companion object {
+        const val VendorBootFileName = "vendor_boot.img"
+
+        /** A real vendor_boot is tens of megabytes; below this it is not one. */
+        const val MinVendorBootBytes = 64L * 1024
+
+        const val VendorBootMagic = "VNDRBOOT"
+
+        /**
+         * First bytes of the file, or "" when they cannot be read.
+         *
+         * Reads until the buffer is full: one `read()` may return fewer bytes
+         * than asked for, and treating that as a short file would reject a
+         * valid image at random.
+         */
+        fun readMagic(path: String, size: Int = VendorBootMagic.length): String = runCatching {
+            val header = ByteArray(size)
+            java.io.File(path).inputStream().use { input ->
+                var filled = 0
+                while (filled < size) {
+                    val read = input.read(header, filled, size - filled)
+                    if (read <= 0) return@runCatching ""
+                    filled += read
+                }
+            }
+            String(header, Charsets.US_ASCII)
+        }.getOrDefault("")
+    }
+
+    /**
+     * Stages vendor_boot.img: keeps the cached path for the parse (MediaTek
+     * physical base) and copies it to the staged name the native runtime reads
+     * (vivo/iQOO vr.ko probe). The magic and size are checked before the image
+     * is trusted: a boot.img or init_boot.img picked by mistake would otherwise
+     * sit under a name the runtime reads, and the failure would only surface
+     * mid-run.
+     */
     private fun stageVendorBoot(uri: String) {
+        markVendorBootImported()
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val bootPath = requireNotNull(pendingBootPath) { "boot.img is not staged" }
-                val vendorBootPath = readDocumentUseCase.cache(uri, "vendor_boot.img")
-                pendingVendorBootPath = vendorBootPath
-                appendLog("vendor_boot.img ready: $vendorBootPath")
-                runParse(bootPath, vendorBootPath = vendorBootPath)
+                val vbPath = readDocumentUseCase.cache(uri, VendorBootFileName)
+                val sizeBytes = java.io.File(vbPath).length()
+                appendLog("vendor_boot.img ready: $vbPath ($sizeBytes bytes)")
+                val magic = readMagic(vbPath)
+                if (magic != VendorBootMagic || sizeBytes < MinVendorBootBytes) {
+                    java.io.File(vbPath).delete()
+                    vendorBootImported = false
+                    appendLog("vendor_boot rejected: magic=\"$magic\" size=$sizeBytes")
+                    appendLog("result: not a vendor_boot image")
+                    showNotice(R.string.parse_result_title, R.string.vivo_vendor_boot_invalid)
+                    return@launch
+                }
+                pendingVendorBootPath = vbPath
+                vendorBootImported = true
+                repository.stageVendorBootImage(vbPath)
+                appendLog("vendor_boot staged: vr.ko tag offsets will be parsed from it at run time")
+                send(GhostlockEffect.Toast(R.string.vivo_vendor_boot_imported))
+                /* Mid-parse: hand control back to the attachment step so xbl /
+                 * uefi can still be added before the parse runs. */
+                if (parseDialogStage == ParseDialogStage.Attach) promptAttach()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                appendLog("parse error: ${error.message}")
-                appendLog("result: parse failed")
+                appendLog("vendor_boot error: ${error.message}")
+                appendLog("result: vendor_boot import failed")
                 showNotice(R.string.parse_result_title, R.string.parse_failed)
             }
         }
@@ -1553,8 +1752,11 @@ class GhostlockViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val payloadPath = readDocumentUseCase.cache(uri, "payload.bin")
+                pendingPayloadPath = payloadPath
+                pendingBootPath = null
+                pendingUrl = null
                 appendLog("payload.bin ready: $payloadPath")
-                runParse(payloadPath)
+                promptAttach()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -1573,8 +1775,96 @@ class GhostlockViewModel(
             showNotice(R.string.parse_result_title, R.string.parse_failed_url)
             return
         }
+        pendingUrl = url
+        pendingBootPath = null
+        pendingPayloadPath = null
+        appendLog("OTA link ready: $url")
+        /* Attachments first: a full package already carries vendor_boot and a
+         * physical-load source, so the user usually just confirms. */
+        promptAttach()
+    }
+
+    /** Confirm path used by [startPendingParse] once the URL was staged. */
+    private fun parseUrl(url: String, xblPath: String?, uefiPath: String?) {
         appendLog("parse OTA: $url")
-        viewModelScope.launch(Dispatchers.IO) { runParse(url) }
+        viewModelScope.launch(Dispatchers.IO) {
+            runParse(url, xblPath = xblPath, uefiPath = uefiPath)
+        }
+    }
+
+    /* ---- vivo/iQOO vendor_boot prompt ---- */
+
+    /** Absolute path of a staged vendor_boot.img, or null when there is none. */
+    private fun stagedVendorBoot(): String? =
+        runCatching { repository.stagedImagePath(VendorBootFileName) }.getOrNull()
+
+    /**
+     * Marks an already staged vendor_boot.img as imported and reports it once,
+     * so a restart does not ask for a file the app still has.
+     */
+    private fun adoptStagedVendorBoot() {
+        if (vendorBootImported) return
+        if (stagedVendorBoot() != null) {
+            vendorBootImported = true
+            viewModelScope.launch(Dispatchers.IO) {
+                appendLog("vendor_boot.img already staged; vr.ko probe will use it")
+            }
+        }
+    }
+
+    /** Set once the user picks a vendor_boot image (success or failure). */
+    private fun markVendorBootImported() {
+        vendorBootImported = true
+        vendorBootPromptPending = false
+    }
+
+    /** vivo/iQOO without a vendor_boot image: ask for it. Called after a parse
+     * produced a profile — that is when the image starts to matter. The request
+     * queues itself when another dialog is on screen and is shown after it
+     * closes, so the two never replace each other. Once per process. */
+    fun promptVendorBootIfNeeded() {
+        if (!looksLikeVivoIqoo() || vendorBootImported) return
+        adoptStagedVendorBoot()
+        if (vendorBootImported) return
+        vendorBootPromptPending = true
+        if (!state.value.dialogVisible) showVendorBootPrompt()
+    }
+
+    private fun showVendorBootPrompt() {
+        vendorBootPromptPending = false
+        mutableState.update {
+            it.copy(
+                dialogVisible = true,
+                dialogType = DialogType.VENDOR_BOOT,
+                dialogTitleRes = R.string.vivo_vendor_boot_prompt_title,
+                dialogMessageRes = R.string.vivo_vendor_boot_prompt_message,
+                dialogConfirmLabelRes = R.string.vivo_vendor_boot_import,
+                dialogDocUrl = null,
+            )
+        }
+    }
+
+    /** Confirm button of the vendor_boot prompt: open the picker. */
+    fun onVendorBootImport() {
+        dismissDialog()
+        send(GhostlockEffect.PickDocument(DocumentRequest.VendorBootImage))
+    }
+
+    /**
+     * vivo / iQOO detection.
+     *
+     * `Build.MANUFACTURER` / `Build.BRAND` are the authoritative fields (iQOO
+     * handsets report manufacturer "vivo" with brand "iQOO"), so they are
+     * checked first. The SoC / device names are only a fallback.
+     */
+    private fun looksLikeVivoIqoo(): Boolean {
+        val identity = listOf(
+            android.os.Build.MANUFACTURER,
+            android.os.Build.BRAND,
+            kernelSnapshot?.deviceName,
+            kernelSnapshot?.socName,
+        ).joinToString(" ").lowercase(Locale.ROOT)
+        return identity.contains("vivo") || identity.contains("iqoo")
     }
 
     /** Confirm/notice popup for an extractor outcome; unlike a Toast it waits
@@ -1651,6 +1941,12 @@ class GhostlockViewModel(
                     } else if (result.documentName == null) {
                         showNotice(R.string.parse_result_title, R.string.parse_success)
                     }
+                    /* The profile is in place: this is when a vivo/iQOO device
+                     * needs to know that vendor_boot.img was not part of the
+                     * parse, because the runtime probe reads the vr.ko tag
+                     * offsets out of it. Queued behind the notice above when one
+                     * is showing. */
+                    promptVendorBootIfNeeded()
                 }
 
                 ParseResult.AlreadyPresent -> {
@@ -1833,5 +2129,90 @@ class GhostlockViewModel(
             val uefiPath: String?,
             val vendorBootPath: String? = null,
         ) : PendingConfirmation
+    }
+}
+
+/* ---- ic-syms 编辑页的字段解析（文件级 helper，纯函数便于单测） ---- */
+
+/** The hard target symbol the edit page exposes next to the geometry. */
+internal const val TimerRootHardTarget = "__tracepoint_sys_exit"
+
+/**
+ * Parses the staged ic-syms text into the editable fields: every recognized
+ * `off.<key>` geometry line (essential keys first, then optional ones) plus the
+ * hard target symbol. Line order inside the file is irrelevant — the save path
+ * matches keys, not positions.
+ */
+internal fun timerRootEditFieldsOf(text: String): List<TimerRootSymsField> {
+    val geometry = linkedMapOf<String, String>()
+    var hardTarget: String? = null
+    text.lineSequence().forEach { raw ->
+        val line = raw.trimEnd('\r', '\n')
+        when {
+            line.startsWith("off.") -> {
+                val key = line.substringAfter("off.").substringBefore('=')
+                val value = line.substringAfter('=', "")
+                if (key in TimerRootGeometry.KNOWN_KEYS && value.isNotBlank()) {
+                    geometry[key] = value.trim()
+                }
+            }
+
+            line.startsWith("$TimerRootHardTarget=") ->
+                hardTarget = line.substringAfter('=', "").trim()
+        }
+    }
+    val ordered = TimerRootGeometry.ESSENTIAL_KEYS.filter { it in geometry } +
+        (geometry.keys - TimerRootGeometry.ESSENTIAL_KEYS.toSet())
+    return buildList {
+        ordered.forEach { key ->
+            add(
+                TimerRootSymsField(
+                    key = key,
+                    label = "off.$key",
+                    value = geometry[key].orEmpty(),
+                    isGeometry = true,
+                ),
+            )
+        }
+        hardTarget?.let {
+            add(
+                TimerRootSymsField(
+                    key = TimerRootHardTarget,
+                    label = TimerRootHardTarget,
+                    value = it,
+                    isGeometry = false,
+                ),
+            )
+        }
+    }
+}
+
+/**
+ * Writes the edited field values back into the table text: each `off.<key>=`
+ * line and the hard target line is replaced in place; every other line (the
+ * symbol table itself, banners, comments) is preserved verbatim.
+ */
+internal fun applyTimerRootEdits(text: String, fields: List<TimerRootSymsField>): String {
+    val byKey = fields.associateBy { it.key }
+    return text.lineSequence().joinToString(separator = "\n") { raw ->
+        val line = raw.trimEnd('\r', '\n')
+        when {
+            line.startsWith("off.") -> {
+                val key = line.substringAfter("off.").substringBefore('=')
+                val edited = byKey[key]?.value
+                if (key in TimerRootGeometry.KNOWN_KEYS && !edited.isNullOrBlank()) {
+                    "off.$key=$edited"
+                } else {
+                    line
+                }
+            }
+
+            line.startsWith("$TimerRootHardTarget=") -> {
+                val edited = byKey[TimerRootHardTarget]?.value
+                if (!edited.isNullOrBlank()) "$TimerRootHardTarget=$edited" else line
+            }
+
+            else -> line
+        }
     }
 }

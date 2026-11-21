@@ -185,6 +185,10 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
     implementation("com.typesafe:config:1.4.9")
     implementation("org.apache.commons:commons-compress:1.28.0")
+    /* Pure-Java zstd decoder for OTA payloads that use REPLACE_ZSTD (op 14):
+     * commons-compress delegates zstd to a JNI library, which would drag a
+     * native blob into every APK, while aircompressor stays Kotlin/JVM-only. */
+    implementation("io.airlift:aircompressor:2.0.2")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("top.yukonga.miuix.kmp:miuix-ui:0.9.4")
