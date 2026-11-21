@@ -51,10 +51,16 @@ interface GhostlockRepository {
      * libtimerroot.so. No-op when nothing was imported. */
     suspend fun removeTimerRootBinary()
 
-    /** Parses an ic-syms table (CVE-2026-98260) from boot.img / OTA / URL. */
+    /**
+     * Parses an ic-syms table (CVE-2026-98260) from a remote full-package
+     * link, a local OTA zip / payload.bin document, or a cached boot image
+     * with optional attached sidecar images. Local packages are read in
+     * place (no full-package copy into app storage); boot / xbl_config /
+     * uefi / vendor_boot are extracted from packages directly.
+     */
     suspend fun parseTimerRootSyms(
-        input: String,
-        onLog: (String) -> Unit,
+        input: com.ghostlock.app.domain.model.TimerRootSymsSource,
+        onLog: (String) -> Unit = {},
     ): com.ghostlock.app.domain.model.ParseResult
 
     /** Imports a ready-made ic-syms table (SAF uri). */

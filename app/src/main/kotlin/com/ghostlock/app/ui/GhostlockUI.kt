@@ -260,15 +260,16 @@ interface GhostlockActions {
     fun onCloseTimerRootDocs()
     fun onPickTimerRootBinary()
     fun onPickTimerRootSyms()
-    fun onPickTimerRootOta()
-    fun onPickTimerRootImage()
+    /** 解析全量包: choose a local OTA zip / payload.bin or a remote link. */
+    fun onParseTimerRootFullPackage()
+    /** 解析本地镜像: choose payload.bin or boot.img. */
+    fun onParseTimerRootImageSource()
     fun onImportTimerRootBinary(uri: String)
     fun onImportTimerRootSyms(uri: String)
     fun onExportTimerRootSyms()
     fun onRemoveTimerRootBinary()
     fun onSetTimerRootAllowAnyKernel(enabled: Boolean)
     fun onSetLaunchManagerOnSuccess(enabled: Boolean)
-    fun onParseTimerRootSyms(input: String)
     fun onDialogItemSelected(index: Int)
 
     /** Confirm button of the vivo/iQOO vendor_boot prompt: open the picker. */

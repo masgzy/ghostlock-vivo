@@ -209,8 +209,8 @@ private fun GhostlockRoute(
             override fun onCloseTimerRootDocs() = viewModel.onCloseTimerRootDocs()
             override fun onPickTimerRootBinary() = viewModel.onPickTimerRootBinary()
             override fun onPickTimerRootSyms() = viewModel.onPickTimerRootSyms()
-            override fun onPickTimerRootOta() = viewModel.onPickTimerRootOta()
-            override fun onPickTimerRootImage() = viewModel.onPickTimerRootImage()
+            override fun onParseTimerRootFullPackage() = viewModel.onParseTimerRootFullPackage()
+            override fun onParseTimerRootImageSource() = viewModel.onParseTimerRootImageSource()
             override fun onImportTimerRootBinary(uri: String) = viewModel.onImportTimerRootBinary(uri)
             override fun onImportTimerRootSyms(uri: String) = viewModel.onImportTimerRootSyms(uri)
             override fun onExportTimerRootSyms() = viewModel.onExportTimerRootSyms()
@@ -220,7 +220,6 @@ private fun GhostlockRoute(
 
             override fun onSetLaunchManagerOnSuccess(enabled: Boolean) =
                 viewModel.toggleLaunchManagerOnSuccess(enabled)
-            override fun onParseTimerRootSyms(input: String) = viewModel.onParseTimerRootSyms(input)
             override fun onDialogItemSelected(index: Int) = viewModel.onDialogItemSelected(index)
             override fun onVendorBootImport() = viewModel.onVendorBootImport()
             override fun onDialogInputChange(value: String) = viewModel.onDialogInputChange(value)

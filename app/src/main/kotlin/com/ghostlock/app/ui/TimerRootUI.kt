@@ -2,7 +2,6 @@ package com.ghostlock.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,10 +11,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
@@ -46,8 +41,13 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 /**
  * TimerRoot (CVE-2026-98260) 配置 — 多级菜单，与 GhostLock 的「参数配置」
- * 同构：加载配置 / 编辑配置 / 配置文档（占位）/ 导出配置，再加上 98260
- * 的专属设置（导入二进制、允许任意内核）。
+ * （ParameterScreen）同构：加载配置 / 编辑配置 / 配置文档（占位）/ 导出配置，
+ * 再加上 98260 的专属设置（导入二进制、允许任意内核）。
+ *
+ * Layout parity with ParameterScreen: page content padding carries the side
+ * margins, items sit in plain cards separated by the LazyColumn spacing —
+ * no per-item padding on top of the page gutter (the double-gap look), and
+ * full-width buttons keep the same side margins as the cards.
  *
  * The chain's "profile" is the staged extended ic-syms table: symbols plus the
  * BTF-derived off.* geometry block. It is produced by the same parsing pipeline
@@ -81,13 +81,9 @@ internal fun TimerRootConfigScreen(
                 .scrollEndHaptic()
                 .overScrollVertical()
                 .nestedScroll(scrollBehavior.nestedScrollConnection),
-            contentPadding = pageContentPadding(
-                paddingValues, top = 0.dp, bottom = 0.dp, horizontalMin = 0.dp,
-            ),
+            contentPadding = pageContentPadding(paddingValues),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item(key = "top-space") { Spacer(Modifier.height(12.dp)) }
-
             /* ---- 已加载状态横幅 ---------------------------------- */
             item(key = "loaded") {
                 ProfileHintBanner(
@@ -103,7 +99,7 @@ internal fun TimerRootConfigScreen(
             }
 
             item(key = "load") {
-                Card(modifier = Modifier.preferencePageItem()) {
+                Card {
                     ArrowPreference(
                         title = stringResource(R.string.timerroot_load_config),
                         summary = stringResource(R.string.timerroot_load_config_summary),
@@ -113,7 +109,7 @@ internal fun TimerRootConfigScreen(
             }
             if (state.timerRootSymsRelease != null) {
                 item(key = "edit") {
-                    Card(modifier = Modifier.preferencePageItem()) {
+                    Card {
                         ArrowPreference(
                             title = stringResource(R.string.timerroot_edit_config),
                             summary = stringResource(R.string.timerroot_edit_config_summary),
@@ -123,7 +119,7 @@ internal fun TimerRootConfigScreen(
                 }
             }
             item(key = "docs") {
-                Card(modifier = Modifier.preferencePageItem()) {
+                Card {
                     ArrowPreference(
                         title = stringResource(R.string.timerroot_config_docs),
                         summary = stringResource(R.string.timerroot_config_docs_summary),
@@ -146,7 +142,7 @@ internal fun TimerRootConfigScreen(
                 SmallTitle(text = stringResource(R.string.timerroot_special_title))
             }
             item(key = "binary") {
-                Card(modifier = Modifier.preferencePageItem()) {
+                Card {
                     Column {
                         val sourceText = stringResource(
                             when (state.timerRootBinarySource) {
@@ -181,7 +177,7 @@ internal fun TimerRootConfigScreen(
                 }
             }
             item(key = "allow-any") {
-                Card(modifier = Modifier.preferencePageItem()) {
+                Card {
                     SwitchPreference(
                         checked = state.timerRootAllowAnyKernel,
                         onCheckedChange = actions::onSetTimerRootAllowAnyKernel,
@@ -200,20 +196,21 @@ internal fun TimerRootConfigScreen(
                     fontSize = 13.sp,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 8.dp),
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
             item(key = "bottom-space") {
-                Spacer(Modifier.height(24.dp).navigationBarsPadding())
+                Spacer(Modifier.height(12.dp).navigationBarsPadding())
             }
         }
     }
 }
 
 /**
- * TimerRoot 配置 → 加载配置 — mirrors the GhostLock「加载配置」page: import
- * a ready-made table, parse one from a full package / local image / URL, and
- * show the currently staged table.
+ * TimerRoot 配置 → 加载配置 — mirrors the GhostLock「加载配置」page
+ * (LoadConfigScreen) in both structure and spacing: import a ready-made
+ * table, parse a full package (local or remote) or a local image
+ * (payload.bin / boot.img), and show the currently staged table.
  */
 @Composable
 internal fun TimerRootLoadConfigScreen(
@@ -221,7 +218,6 @@ internal fun TimerRootLoadConfigScreen(
     actions: GhostlockActions,
 ) {
     val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
-    var otaUrl by remember { mutableStateOf("") }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -248,7 +244,6 @@ internal fun TimerRootLoadConfigScreen(
             contentPadding = pageContentPadding(
                 paddingValues, top = 0.dp, bottom = 0.dp, horizontalMin = 0.dp,
             ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item(key = "top-space") { Spacer(Modifier.height(12.dp)) }
 
@@ -261,12 +256,12 @@ internal fun TimerRootLoadConfigScreen(
                     )
                 }
             }
-            item(key = "parse-ota-zip") {
+            item(key = "parse-full-package") {
                 Card(modifier = Modifier.preferencePageItem()) {
                     ArrowPreference(
                         title = stringResource(R.string.timerroot_parse_ota_zip),
                         summary = stringResource(R.string.timerroot_parse_ota_zip_summary),
-                        onClick = actions::onPickTimerRootOta,
+                        onClick = actions::onParseTimerRootFullPackage,
                     )
                 }
             }
@@ -275,36 +270,8 @@ internal fun TimerRootLoadConfigScreen(
                     ArrowPreference(
                         title = stringResource(R.string.timerroot_parse_image),
                         summary = stringResource(R.string.timerroot_parse_image_summary),
-                        onClick = actions::onPickTimerRootImage,
+                        onClick = actions::onParseTimerRootImageSource,
                     )
-                }
-            }
-            item(key = "parse-url") {
-                Card(modifier = Modifier.preferencePageItem()) {
-                    Column {
-                        Text(
-                            text = stringResource(R.string.timerroot_parse_ota_url),
-                            style = MiuixTheme.textStyles.body2,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                        )
-                        TextField(
-                            value = otaUrl,
-                            onValueChange = { otaUrl = it },
-                            label = stringResource(R.string.timerroot_parse_hint),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                            singleLine = true,
-                        )
-                        TextButton(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                            text = stringResource(R.string.timerroot_parse_button),
-                            colors = ButtonDefaults.textButtonColorsPrimary(),
-                            onClick = { actions.onParseTimerRootSyms(otaUrl) },
-                        )
-                    }
                 }
             }
 
@@ -377,7 +344,8 @@ internal fun TimerRootLoadConfigScreen(
 /**
  * TimerRoot 配置 → 编辑配置 — the staged table's off.* geometry block and the
  * hard target symbol as text fields; everything else in the table is preserved
- * verbatim on save.
+ * verbatim on save. ParameterScreen layout: page gutter carries the margins,
+ * save / revert keep the same side margins as the cards.
  */
 @Composable
 internal fun TimerRootEditScreen(
@@ -408,13 +376,9 @@ internal fun TimerRootEditScreen(
                 .scrollEndHaptic()
                 .overScrollVertical()
                 .nestedScroll(scrollBehavior.nestedScrollConnection),
-            contentPadding = pageContentPadding(
-                paddingValues, top = 0.dp, bottom = 0.dp, horizontalMin = 0.dp,
-            ),
+            contentPadding = pageContentPadding(paddingValues),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item(key = "top-space") { Spacer(Modifier.height(12.dp)) }
-
             item(key = "info") {
                 ProfileHintBanner(
                     title = state.timerRootSymsRelease
@@ -428,7 +392,7 @@ internal fun TimerRootEditScreen(
             }
             state.timerRootEditFields.withIndex().forEach { (index, field) ->
                 item(key = "field-$index-${field.key}") {
-                    Card(modifier = Modifier.preferencePageItem()) {
+                    Card {
                         TextField(
                             value = field.value,
                             onValueChange = { actions.onTimerRootFieldChanged(index, it) },
@@ -458,7 +422,7 @@ internal fun TimerRootEditScreen(
                 }
             }
             item(key = "bottom-space") {
-                Spacer(Modifier.height(24.dp).navigationBarsPadding())
+                Spacer(Modifier.height(12.dp).navigationBarsPadding())
             }
         }
     }
@@ -495,7 +459,6 @@ internal fun TimerRootDocsScreen(
             contentPadding = pageContentPadding(paddingValues),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item(key = "top-space") { Spacer(Modifier.height(12.dp)) }
             item(key = "placeholder") {
                 ProfileHintBanner(
                     title = stringResource(R.string.timerroot_docs_placeholder_title),
@@ -503,7 +466,7 @@ internal fun TimerRootDocsScreen(
                 )
             }
             item(key = "notes") {
-                Card(modifier = Modifier.preferencePageItem()) {
+                Card {
                     Column {
                         Text(
                             text = stringResource(R.string.timerroot_docs_format_title),
@@ -520,7 +483,7 @@ internal fun TimerRootDocsScreen(
                 }
             }
             item(key = "bottom-space") {
-                Spacer(Modifier.height(24.dp).navigationBarsPadding())
+                Spacer(Modifier.height(12.dp).navigationBarsPadding())
             }
         }
     }

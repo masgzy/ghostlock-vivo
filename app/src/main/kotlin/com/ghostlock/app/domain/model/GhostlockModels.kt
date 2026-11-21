@@ -238,3 +238,34 @@ sealed interface ParseResult {
 
     data class Failed(val code: Int, val reason: String? = null) : ParseResult
 }
+
+/**
+ * Input of the TimerRoot (CVE-2026-98260) ic-syms parse. Mirrors the
+ * GhostLock parse sources: a remote full-package link, a local OTA zip /
+ * payload.bin document, or an already-staged boot image with optional
+ * attached sidecar images.
+ */
+sealed interface TimerRootSymsSource {
+    /** Remote OTA zip / payload.bin link; partitions are range-extracted. */
+    data class Url(val url: String) : TimerRootSymsSource
+
+    /**
+     * Local OTA zip or payload.bin document (SAF uri). The package is read
+     * in place through a seekable descriptor — a full package is never
+     * copied into app storage first — and boot / xbl_config / uefi /
+     * vendor_boot are extracted straight from it.
+     */
+    data class Package(val uri: String) : TimerRootSymsSource
+
+    /**
+     * A cached boot image (bare boot.img has no partitions to extract);
+     * xbl_config / uefi derive the physical base, vendor_boot feeds the
+     * runtime vr.ko probe on vivo/iQOO.
+     */
+    data class BootImage(
+        val path: String,
+        val xblConfigPath: String? = null,
+        val uefiPath: String? = null,
+        val vendorBootPath: String? = null,
+    ) : TimerRootSymsSource
+}

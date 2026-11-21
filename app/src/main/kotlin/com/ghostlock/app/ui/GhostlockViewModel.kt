@@ -16,6 +16,7 @@ import com.ghostlock.app.domain.model.ProfileConfig
 import com.ghostlock.app.domain.model.ProfileFieldNode
 import com.ghostlock.app.domain.model.ShizukuStatus
 import com.ghostlock.app.domain.model.TimerRootGeometry
+import com.ghostlock.app.domain.model.TimerRootSymsSource
 import com.ghostlock.app.domain.repository.GhostlockRepository
 import com.ghostlock.app.domain.repository.ProfileConfigController
 import com.ghostlock.app.domain.usecase.FormatLogUseCase
@@ -52,6 +53,7 @@ private const val OverwriteSummaryLimit = 12
 enum class DocumentRequest {
     ImportOffsetsHocon, ImportOffsetsJson, BootImage, XblImage, PayloadImage, UefiImage,
     VendorBootImage, TimerRootBinary, TimerRootSyms, TimerRootOtaZip, TimerRootImage,
+    TimerRootPayload,
 }
 
 /** Options offered by the attachment step, in display order. The step is a
@@ -60,7 +62,10 @@ enum class DocumentRequest {
  * path and the vivo/iQOO vr.ko probe. */
 private enum class AttachOption { START, XBL, UEFI, VENDOR_BOOT }
 
-private enum class ParseDialogStage { Mode, Attach }
+/** Whose parse the attachment loop and the pending staged paths belong to. */
+private enum class AttachTarget { Ghostlock, TimerRoot }
+
+private enum class ParseDialogStage { Mode, Attach, TimerRootSource, TimerRootImageMode }
 
 class GhostlockViewModel(
     private val repository: GhostlockRepository,
@@ -90,6 +95,10 @@ class GhostlockViewModel(
     private var pendingVendorBootPath: String? = null
     private var pendingAttachOptions: List<AttachOption> = emptyList()
     private var parseDialogStage = ParseDialogStage.Mode
+    /** Owner of the open attachment loop / staged pending paths. */
+    private var attachTarget = AttachTarget.Ghostlock
+    /** The INPUT dialog currently open is the TimerRoot full-package URL. */
+    private var timerRootUrlPending = false
     /* Queued vendor_boot request, shown once the current dialog closes. */
     private var vendorBootPromptPending = false
     private var vendorBootImported = false
@@ -943,44 +952,180 @@ class GhostlockViewModel(
         }
     }
 
-    fun onParseTimerRootSyms(input: String) {
-        onParseTimerRootSymsInternal(input)
-    }
+    /* ---- 98260 配置: parse flows -------------------------------------- */
 
-    /** 98260 配置: parse a picked local image (full OTA zip / boot.img /
-     * payload.bin) into the staged table. The extractor sniffs the container
-     * itself, so one funnel covers all three. */
-    private fun parseTimerRootInput(uri: String, cacheName: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val staged = runCatching { readDocumentUseCase.cache(uri, cacheName) }
-                .onFailure {
-                    appendLog("98260 parse error: ${it.message}")
-                    send(GhostlockEffect.Toast(R.string.timerroot_parse_failed))
-                }
-                .getOrNull()
-                ?: return@launch
-            appendLog("98260 source staged: $staged")
-            onParseTimerRootSymsInternal(staged)
+    /** 解析全量包 — one entry, local or remote, like the GhostLock parse:
+     * full packages carry every partition, so nothing needs attaching. */
+    fun onParseTimerRootFullPackage() {
+        parseDialogStage = ParseDialogStage.TimerRootSource
+        mutableState.update {
+            it.copy(
+                dialogVisible = true,
+                dialogType = DialogType.LIST,
+                dialogTitleRes = R.string.timerroot_parse_full_title,
+                dialogItems = emptyList(),
+                dialogItemResIds = listOf(
+                    R.string.timerroot_source_local,
+                    R.string.timerroot_source_url,
+                ),
+            )
         }
     }
 
-    /** Shared by the URL dialog action and the picked-file funnel. */
-    private fun onParseTimerRootSymsInternal(input: String) {
+    /** 解析本地镜像 — payload.bin (partitions extracted directly) or a bare
+     * boot.img (attachment loop), mirroring the GhostLock parse source. */
+    fun onParseTimerRootImageSource() {
+        parseDialogStage = ParseDialogStage.TimerRootImageMode
+        mutableState.update {
+            it.copy(
+                dialogVisible = true,
+                dialogType = DialogType.LIST,
+                dialogTitleRes = R.string.parse_title,
+                dialogItems = emptyList(),
+                dialogItemResIds = listOf(
+                    R.string.parse_option_payload,
+                    R.string.parse_option_boot,
+                ),
+            )
+        }
+    }
+
+    /** The INPUT dialog for a remote full package (完整包链接). */
+    private fun promptTimerRootUrl() {
+        timerRootUrlPending = true
+        mutableState.update {
+            it.copy(
+                dialogVisible = true,
+                dialogType = DialogType.INPUT,
+                dialogTitleRes = R.string.parse_url_title,
+                dialogMessageRes = R.string.parse_url_hint,
+                dialogInput = "",
+                dialogConfirmLabelRes = R.string.parse_start,
+            )
+        }
+    }
+
+    /**
+     * Local full package (OTA zip / payload.bin): partitions are extracted
+     * straight from the document — the package is read in place, never
+     * copied into app storage — so no attachment step is offered.
+     */
+    private fun parseTimerRootPackage(uri: String) {
         if (!beginOperation()) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                when (val result = repository.parseTimerRootSyms(input, ::appendLog)) {
-                    is ParseResult.Parsed -> {
-                        appendLog("ic-syms: table staged for ${result.releases.firstOrNull() ?: "?"}")
-                        refreshTimerRootState()
-                    }
-                    is ParseResult.Failed ->
-                        appendLog("ic-syms: parse failed (${result.reason ?: "exit ${result.code}"})")
-                    else -> {}
-                }
+                handleTimerRootParseResult(
+                    repository.parseTimerRootSyms(TimerRootSymsSource.Package(uri), ::appendLog),
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                /* Nothing in the parse funnel may take the process down: an
+                 * unexpected failure is a log line and a notice dialog. */
+                appendLog("parse error: ${error.message}")
+                appendLog("result: parse failed")
+                showNotice(R.string.parse_result_title, R.string.parse_failed)
             } finally {
                 endOperation()
             }
+        }
+    }
+
+    /**
+     * Bare boot.img: cached (an image is orders of magnitude smaller than a
+     * full package), then the attachment loop offers xbl_config / uefi /
+     * vendor_boot before the parse runs — same flow as the GhostLock parse.
+     */
+    private fun stageTimerRootBoot(uri: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val bootPath = readDocumentUseCase.cache(uri, "boot.img")
+                pendingBootPath = bootPath
+                pendingPayloadPath = null
+                pendingUrl = null
+                appendLog("boot.img ready: $bootPath")
+                attachTarget = AttachTarget.TimerRoot
+                promptAttach()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                appendLog("parse error: ${error.message}")
+                appendLog("result: parse failed")
+                showNotice(R.string.parse_result_title, R.string.parse_failed)
+            }
+        }
+    }
+
+    /** Attach-loop START for the TimerRoot boot-image flow. */
+    private fun startTimerRootAttachParse() {
+        parseDialogStage = ParseDialogStage.Mode
+        val boot = pendingBootPath
+        val xbl = pendingXblPath
+        val uefi = pendingUefiPath
+        val vendorBoot = pendingVendorBootPath
+        pendingBootPath = null
+        pendingPayloadPath = null
+        pendingUrl = null
+        pendingXblPath = null
+        pendingUefiPath = null
+        pendingVendorBootPath = null
+        if (boot != null) {
+            runTimerRootParse(TimerRootSymsSource.BootImage(boot, xbl, uefi, vendorBoot))
+        }
+    }
+
+    /** Confirm path of the full-package URL dialog. */
+    private fun parseTimerRootUrl(value: String) {
+        val url = value.trim()
+        if (url.isEmpty() || !(url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true))) {
+            appendLog("error: invalid OTA URL: $url")
+            appendLog("result: parse failed")
+            showNotice(R.string.parse_result_title, R.string.parse_failed_url)
+            return
+        }
+        runTimerRootParse(TimerRootSymsSource.Url(url))
+    }
+
+    /** Shared parse driver: opens the log sheet, logs GhostLock-style result
+     * lines, and refreshes the staged-table state. */
+    private fun runTimerRootParse(source: TimerRootSymsSource) {
+        if (!beginOperation()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                handleTimerRootParseResult(repository.parseTimerRootSyms(source, ::appendLog))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                appendLog("parse error: ${error.message}")
+                appendLog("result: parse failed")
+                showNotice(R.string.parse_result_title, R.string.parse_failed)
+            } finally {
+                endOperation()
+            }
+        }
+    }
+
+    /** Result lines identical to the GhostLock parse, so the 98260 flow reads
+     * the same in the log sheet ("offsets exported: …" / "<k> result: …"). */
+    private suspend fun handleTimerRootParseResult(result: ParseResult) {
+        when (result) {
+            is ParseResult.Parsed -> {
+                appendLog("offsets exported: ${result.releases.joinToString()}")
+                appendLog("result: offsets parsed successfully")
+                refreshTimerRootState()
+                /* The table is in place: on a vivo/iQOO device this is when the
+                 * vendor_boot.img question matters (the runtime probe reads
+                 * the vr.ko tag offsets out of it). */
+                promptVendorBootIfNeeded()
+            }
+
+            is ParseResult.Failed -> {
+                result.reason?.let { appendLog("parse failed: $it") }
+                appendLog("result: ${parseFailureResult(result.code)}")
+                showNotice(R.string.parse_result_title, parseFailureToast(result.code))
+            }
+
+            else -> {}
         }
     }
 
@@ -1323,14 +1468,9 @@ class GhostlockViewModel(
     fun onPickTimerRootSyms() =
         send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootSyms))
 
-    fun onPickTimerRootOta() =
-        send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootOtaZip))
-
-    fun onPickTimerRootImage() =
-        send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootImage))
-
     fun parseOffsets() {
         parseDialogStage = ParseDialogStage.Mode
+        attachTarget = AttachTarget.Ghostlock
         mutableState.update {
             it.copy(
                 dialogVisible = true,
@@ -1349,7 +1489,8 @@ class GhostlockViewModel(
      * extra image, so any combination is reachable without one entry per
      * combination. vendor_boot.img belongs here: on MediaTek it supplies
      * kernel_phys_load, and on vivo/iQOO it carries the vr.ko module the
-     * runtime probe reads. */
+     * runtime probe reads. Serves both chains ([attachTarget] decides which
+     * parser the Start item runs). */
     private fun promptAttach() {
         parseDialogStage = ParseDialogStage.Attach
         val options = buildList {
@@ -1379,6 +1520,7 @@ class GhostlockViewModel(
     }
 
     fun promptParseUrl() {
+        attachTarget = AttachTarget.Ghostlock
         mutableState.update {
             it.copy(
                 dialogVisible = true,
@@ -1400,8 +1542,9 @@ class GhostlockViewModel(
             DocumentRequest.PayloadImage -> stagePayload(uri)
             DocumentRequest.TimerRootBinary -> onImportTimerRootBinary(uri)
             DocumentRequest.TimerRootSyms -> onImportTimerRootSyms(uri)
-            DocumentRequest.TimerRootOtaZip -> parseTimerRootInput(uri, "ota.zip")
-            DocumentRequest.TimerRootImage -> parseTimerRootInput(uri, "image.bin")
+            DocumentRequest.TimerRootOtaZip -> parseTimerRootPackage(uri)
+            DocumentRequest.TimerRootPayload -> parseTimerRootPackage(uri)
+            DocumentRequest.TimerRootImage -> stageTimerRootBoot(uri)
             DocumentRequest.ImportOffsetsHocon, DocumentRequest.ImportOffsetsJson -> Unit
         }
     }
@@ -1419,8 +1562,9 @@ class GhostlockViewModel(
             DocumentRequest.PayloadImage -> uris.firstOrNull()?.let(::stagePayload)
             DocumentRequest.TimerRootBinary -> uris.firstOrNull()?.let(::onImportTimerRootBinary)
             DocumentRequest.TimerRootSyms -> uris.firstOrNull()?.let(::onImportTimerRootSyms)
-            DocumentRequest.TimerRootOtaZip -> uris.firstOrNull()?.let { parseTimerRootInput(it, "ota.zip") }
-            DocumentRequest.TimerRootImage -> uris.firstOrNull()?.let { parseTimerRootInput(it, "image.bin") }
+            DocumentRequest.TimerRootOtaZip -> uris.firstOrNull()?.let(::parseTimerRootPackage)
+            DocumentRequest.TimerRootPayload -> uris.firstOrNull()?.let(::parseTimerRootPackage)
+            DocumentRequest.TimerRootImage -> uris.firstOrNull()?.let(::stageTimerRootBoot)
         }
     }
 
@@ -1432,9 +1576,28 @@ class GhostlockViewModel(
                 1 -> pickBoot()
             }
 
+            ParseDialogStage.TimerRootSource -> when (index) {
+                0 -> send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootOtaZip))
+                1 -> promptTimerRootUrl()
+            }
+
+            ParseDialogStage.TimerRootImageMode -> when (index) {
+                0 -> {
+                    send(GhostlockEffect.Toast(R.string.parse_pick_payload_hint))
+                    send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootPayload))
+                }
+
+                1 -> send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootImage))
+            }
+
             ParseDialogStage.Attach -> when (pendingAttachOptions.getOrNull(index)) {
                 /* Start, or attach one more image and come straight back here. */
-                AttachOption.START -> startPendingParse()
+                AttachOption.START -> if (attachTarget == AttachTarget.TimerRoot) {
+                    startTimerRootAttachParse()
+                } else {
+                    startPendingParse()
+                }
+
                 AttachOption.XBL -> send(GhostlockEffect.PickDocument(DocumentRequest.XblImage))
                 AttachOption.UEFI -> send(GhostlockEffect.PickDocument(DocumentRequest.UefiImage))
                 AttachOption.VENDOR_BOOT -> onVendorBootImport()
@@ -1448,9 +1611,12 @@ class GhostlockViewModel(
     fun onDialogConfirm(value: String) {
         val dialogType = state.value.dialogType
         val renameTarget = state.value.userProfileRenameTarget
+        val timerRootUrl = timerRootUrlPending
+        timerRootUrlPending = false
         dismissDialog(clearConfirmation = false)
         when {
             renameTarget != null -> renameUserProfile(renameTarget, value)
+            timerRootUrl -> parseTimerRootUrl(value)
             dialogType == DialogType.INPUT -> parseUrl(value)
             dialogType == DialogType.CONFIRM -> toggleShizuku(true)
             else -> Unit
@@ -1573,6 +1739,7 @@ class GhostlockViewModel(
     }
 
     private fun pickPayload() {
+        attachTarget = AttachTarget.Ghostlock
         pendingPayloadPath = null
         pendingXblPath = null
         pendingUefiPath = null
@@ -1581,6 +1748,7 @@ class GhostlockViewModel(
     }
 
     private fun pickBoot() {
+        attachTarget = AttachTarget.Ghostlock
         pendingBootPath = null
         pendingXblPath = null
         pendingUefiPath = null

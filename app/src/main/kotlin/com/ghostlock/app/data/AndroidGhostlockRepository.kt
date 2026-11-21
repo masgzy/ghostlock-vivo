@@ -19,10 +19,13 @@ import com.ghostlock.app.domain.model.TimerRootBinarySource
 import com.ghostlock.app.domain.model.TimerRootState
 import com.ghostlock.app.domain.model.KernelSnapshot
 import com.ghostlock.app.domain.model.OffsetCandidate
+import com.ghostlock.app.data.ota.HttpRangeReader
+import com.ghostlock.app.data.ota.LocalFileRangeReader
 import com.ghostlock.app.data.ota.OtaPayloadExtractor
 import com.ghostlock.app.domain.model.OffsetImportResult
 import com.ghostlock.app.domain.model.ParseResult
 import com.ghostlock.app.domain.model.ProfileConfig
+import com.ghostlock.app.domain.model.TimerRootSymsSource
 import com.ghostlock.app.domain.model.UserProfileFile
 import com.ghostlock.app.domain.repository.GhostlockRepository
 import com.ghostlock.app.domain.repository.ProfileConfigController
@@ -353,49 +356,112 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
     /**
      * Runs the extractor with `--format ic-syms` against the same input
      * universe as parseSource (boot.img / payload.bin / local OTA zip / URL)
-     * and stages the result as the TimerRoot table. A local path is passed
-     * straight through — the extractor sniffs the container itself — while a
-     * URL is downloaded and unpacked to boot.img first. The output carries
-     * the BTF geometry block when the image has BTF.
+     * and stages the result as the TimerRoot table. The output carries the
+     * BTF geometry block when the image has BTF.
+     *
+     * A package source (local OTA zip / payload.bin / URL) is decoded by the
+     * pure-Kotlin extractor — boot, xbl_config, uefi and vendor_boot come
+     * straight out of the package, no attach step — and local packages are
+     * read in place through a seekable descriptor, so an 8 GiB full package
+     * is never copied into app storage first. A bare boot image goes to the
+     * native extractor with whatever was attached in the attach loop.
      */
     override suspend fun parseTimerRootSyms(
-        input: String,
+        input: TimerRootSymsSource,
         onLog: (String) -> Unit,
-    ): ParseResult {
+    ): ParseResult = withContext(Dispatchers.IO) {
         val binary = File(appContext.applicationInfo.nativeLibraryDir, ExtractBinaryName)
         if (!binary.isFile) {
-            return ParseResult.Failed(1, "missing native binary: ${binary.absolutePath}")
+            return@withContext ParseResult.Failed(1, "missing native binary: ${binary.absolutePath}")
         }
-        return try {
+        return@withContext try {
             val out = File(filesDir, TIMER_ROOT_SYMS)
-            val isRemoteUrl = input.startsWith("http://", ignoreCase = true) ||
-                input.startsWith("https://", ignoreCase = true)
             var tempBoot: File? = null
-            val effectiveInput = if (isRemoteUrl) {
-                /* 98260 consumes only the boot image: no vendor_boot pull (that
-                 * is the vivo vr.ko probe of the Ghostlock chain) and no extra
-                 * physical-load source, so the download stays minimal. */
-                val extracted = OtaPayloadExtractor.extractPartitions(
-                    url = input,
-                    workDir = filesDir,
-                    onLog = onLog,
-                    wantVendorBoot = false,
-                    candidates = setOf("boot"),
-                )
-                tempBoot = extracted.bootFile
-                extracted.bootFile.absolutePath
-            } else {
-                input
-            }
+            var tempXbl: File? = null
+            var tempUefi: File? = null
+            var tempVendorBoot: File? = null
+            var localReader: LocalFileRangeReader? = null
             try {
-                onLog("<t> ic-syms: extracting from $effectiveInput")
+                var bootPath: String
+                var xblPath: String? = null
+                var uefiPath: String? = null
+                var vendorBootPath: String? = null
+                when (input) {
+                    is TimerRootSymsSource.BootImage -> {
+                        bootPath = input.path
+                        xblPath = input.xblConfigPath
+                        uefiPath = input.uefiPath
+                        vendorBootPath = input.vendorBootPath
+                    }
+
+                    is TimerRootSymsSource.Url -> {
+                        onLog("parse OTA: ${input.url}")
+                        val extracted = extractPackagePartitions(
+                            url = input.url,
+                            onLog = onLog,
+                            reader = null,
+                        )
+                        bootPath = extracted.bootFile.also { tempBoot = it }.absolutePath
+                        xblPath = extracted.xblConfigFile?.also { tempXbl = it }?.absolutePath
+                        uefiPath = extracted.uefiFile?.let {
+                            tempUefi = it
+                            stageUefiFile(it, onLog) ?: it.absolutePath
+                        }
+                        extracted.vendorBootFile?.let { vendorBoot ->
+                            tempVendorBoot = vendorBoot
+                            if (stageVendorBootFile(vendorBoot, onLog)) {
+                                vendorBoot.delete()
+                                tempVendorBoot = null
+                            }
+                        }
+                    }
+
+                    is TimerRootSymsSource.Package -> {
+                        /* Read the package where it lies: a seekable descriptor
+                         * over the picked document feeds the same Kotlin
+                         * extractor the URL path uses, without copying an
+                         * 8 GiB package into filesDir first. */
+                        val reader = LocalFileRangeReader(appContext.contentResolver, input.uri.toUri())
+                        localReader = reader
+                        val size = reader.fileLength("local")
+                        onLog("local package: ${OtaPayloadExtractor.formatSize(size ?: 0L)}")
+                        val extracted = extractPackagePartitions(
+                            url = "local",
+                            onLog = onLog,
+                            reader = reader,
+                        )
+                        bootPath = extracted.bootFile.also { tempBoot = it }.absolutePath
+                        xblPath = extracted.xblConfigFile?.also { tempXbl = it }?.absolutePath
+                        uefiPath = extracted.uefiFile?.let {
+                            tempUefi = it
+                            stageUefiFile(it, onLog) ?: it.absolutePath
+                        }
+                        extracted.vendorBootFile?.let { vendorBoot ->
+                            tempVendorBoot = vendorBoot
+                            if (stageVendorBootFile(vendorBoot, onLog)) {
+                                vendorBoot.delete()
+                                tempVendorBoot = null
+                            }
+                        }
+                    }
+                }
+
+                onLog("<k> extract: $bootPath")
                 val code = runProcess(
                     ProcessBuilder(
-                        listOf(
-                            binary.absolutePath, effectiveInput,
-                            "--format", "ic-syms", "--out", out.absolutePath,
-                            "--work-dir", filesDir.absolutePath,
-                        ),
+                        buildList {
+                            add(binary.absolutePath)
+                            add(bootPath)
+                            xblPath?.let { add("--xbl-config"); add(it) }
+                            uefiPath?.let { add("--uefi"); add(it) }
+                            vendorBootPath?.let { add("--vendor-boot"); add(it) }
+                            addAll(
+                                listOf(
+                                    "--format", "ic-syms", "--out", out.absolutePath,
+                                    "--work-dir", filesDir.absolutePath,
+                                ),
+                            )
+                        },
                     ).directory(filesDir).redirectErrorStream(true).apply {
                         environment()["GHOSTLOCK_HOME"] = filesDir.absolutePath
                         environment()["TMPDIR"] = filesDir.absolutePath
@@ -404,15 +470,19 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
                     onLog = onLog,
                     timeoutSeconds = 1800,
                 )
-                onLog("<t> ic-syms exit code=$code")
-                if (code != 0 || !out.isFile) return ParseResult.Failed(code)
+                onLog("<k> extract exit code=$code")
+                if (code != 0 || !out.isFile) return@withContext ParseResult.Failed(code)
                 val release = out.readLines()
                     .firstOrNull { it.startsWith("# build=") }
                     ?.removePrefix("# build=")
-                    ?: return ParseResult.Failed(code, "table carries no build header")
+                    ?: return@withContext ParseResult.Failed(code, "table carries no build header")
                 ParseResult.Parsed(listOf(release), emptySet(), TIMER_ROOT_SYMS)
             } finally {
                 tempBoot?.delete()
+                tempXbl?.delete()
+                tempUefi?.delete()
+                tempVendorBoot?.delete()
+                localReader?.close()
             }
         } catch (error: CancellationException) {
             throw error
@@ -420,6 +490,19 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             ParseResult.Failed(1, error.message)
         }
     }
+
+    /** Shared package decode for the URL and local-document sources. */
+    private suspend fun extractPackagePartitions(
+        url: String,
+        onLog: (String) -> Unit,
+        reader: HttpRangeReader?,
+    ): OtaPayloadExtractor.ExtractedPartitions = OtaPayloadExtractor.extractPartitions(
+        url = url,
+        workDir = filesDir,
+        onLog = onLog,
+        wantVendorBoot = isVivoOrIqoo(),
+        reader = reader ?: HttpRangeReader(),
+    )
 
     override suspend fun importTimerRootSyms(uri: String): String? = withContext(Dispatchers.IO) {
         /* An ic-syms table is a small text file (tens of KiB). Reading it with
