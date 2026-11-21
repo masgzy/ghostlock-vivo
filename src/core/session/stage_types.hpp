@@ -34,6 +34,12 @@ namespace ghostlock::session {
         int32_t child_alive = 1;
         int32_t seccomp_ok = 0;
         int32_t ever_rooted = 0;
+        /* W3 leaf direction learned by the comm probe: -1 unknown, 0 = a
+ * leaf write lands on [target], 1 = [target+8]. Set by the probe that
+ * now runs inside w2() BEFORE the credential write (an unprivileged
+ * child is cheap to retire), reused by every later W3 round so the
+ * probe write is paid at most once per run. */
+        int32_t leaf_dir = -1;
     };
 
     using write_stage_verify_fn = int32_t (*)(void *context);
