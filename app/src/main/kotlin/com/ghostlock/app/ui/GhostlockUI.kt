@@ -202,7 +202,7 @@ data class GhostlockUiState(
     val launchManagerOnSuccess: Boolean = true,
 )
 
-enum class DialogType { NONE, LIST, INPUT, CONFIRM, NOTICE }
+enum class DialogType { NONE, LIST, INPUT, CONFIRM, NOTICE, VENDOR_BOOT }
 
 data class GhostlockLogLine(val text: String, val color: Int)
 
@@ -242,6 +242,9 @@ interface GhostlockActions {
     fun onSetLaunchManagerOnSuccess(enabled: Boolean)
     fun onParseTimerRootSyms(input: String)
     fun onDialogItemSelected(index: Int)
+
+    /** Confirm button of the vivo/iQOO vendor_boot prompt: open the picker. */
+    fun onVendorBootImport()
     fun onDialogInputChange(value: String)
     fun onDialogConfirm(value: String)
     fun onDialogDismiss()
@@ -795,6 +798,35 @@ private fun GhostlockDialog(
                             modifier = Modifier.weight(1f),
                             text = stringResource(R.string.dialog_dismiss),
                             colors = ButtonDefaults.textButtonColorsPrimary(),
+                            onClick = actions::onDialogDismiss,
+                        )
+                    }
+                }
+
+                DialogType.VENDOR_BOOT -> {
+                    Text(
+                        text = stringResource(state.dialogMessageRes),
+                        modifier = Modifier.fillMaxWidth(),
+                        style = MiuixTheme.textStyles.body2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                    /* Import carries the accent colour so it reads as the
+                     * suggested action; cancel stays plain. */
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 16.dp),
+                    ) {
+                        TextButton(
+                            modifier = Modifier.weight(1f),
+                            text = stringResource(state.dialogConfirmLabelRes),
+                            colors = ButtonDefaults.textButtonColorsPrimary(),
+                            onClick = actions::onVendorBootImport,
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        TextButton(
+                            modifier = Modifier.weight(1f),
+                            text = stringResource(R.string.vivo_vendor_boot_cancel),
                             onClick = actions::onDialogDismiss,
                         )
                     }

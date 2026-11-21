@@ -28,10 +28,8 @@
     <string name="parse_option_payload">payload.bin</string>
     <string name="parse_option_boot">boot.img</string>
     <string name="parse_boot_attach_title">Adjuntar xbl_config.img / uefi.img (opcional)</string>
-    <string name="parse_attach_none">Analizar directamente (sin adjuntos)</string>
     <string name="parse_attach_xbl">Adjuntar xbl_config.img</string>
     <string name="parse_attach_uefi">Adjuntar uefi.img</string>
-    <string name="parse_attach_xbl_uefi">Adjuntar xbl_config.img + uefi.img</string>
     <string name="parse_attach_vendor_boot">Adjuntar vendor_boot.img (solo MediaTek)</string>
     <string name="parse_url_title">URL del paquete completo</string>
     <string name="parse_url_hint">Pega la URL del ZIP OTA completo</string>

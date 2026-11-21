@@ -212,6 +212,7 @@ private fun GhostlockRoute(
                 viewModel.toggleLaunchManagerOnSuccess(enabled)
             override fun onParseTimerRootSyms(input: String) = viewModel.onParseTimerRootSyms(input)
             override fun onDialogItemSelected(index: Int) = viewModel.onDialogItemSelected(index)
+            override fun onVendorBootImport() = viewModel.onVendorBootImport()
             override fun onDialogInputChange(value: String) = viewModel.onDialogInputChange(value)
             override fun onDialogConfirm(value: String) = viewModel.onDialogConfirm(value)
             override fun onDialogDismiss() = viewModel.onDialogDismiss()

@@ -72,6 +72,21 @@ interface GhostlockRepository {
     /** Runs the TimerRoot (CVE-2026-98260) chain through Shizuku. */
     suspend fun runExploitAsTimerRoot(onLog: (String) -> Unit): Int
 
+    /**
+     * Absolute path of an already staged image (a `cacheDocument` target), or
+     * null when nothing is staged under that name. The native runtime reads
+     * the same directory through GHOSTLOCK_HOME, so the app can report the
+     * state it will actually see.
+     */
+    fun stagedImagePath(fileName: String): String?
+
+    /**
+     * Copies a validated vendor_boot.img (magic-checked by the caller) to the
+     * staged name the native runtime reads for the vivo/iQOO vr.ko probe.
+     * Synchronous disk copy; call from Dispatchers.IO.
+     */
+    fun stageVendorBootImage(sourcePath: String)
+
     /** Launch the selected (or auto-resolved) root manager's main activity.
      * Returns the launched package, or null when nothing could be started. */
     fun launchRootManager(): String?

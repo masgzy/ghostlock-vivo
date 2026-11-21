@@ -27,12 +27,12 @@
     <string name="parse_title">Parse source</string>
     <string name="parse_option_payload">payload.bin</string>
     <string name="parse_option_boot">boot.img</string>
-    <string name="parse_boot_attach_title">Attach xbl_config.img / uefi.img (optional)</string>
-    <string name="parse_attach_none">Parse directly (no attachment)</string>
+    <string name="parse_boot_attach_title">Attach images (optional)</string>
+    <string name="parse_attach_start">Start parsing</string>
     <string name="parse_attach_xbl">Attach xbl_config.img</string>
     <string name="parse_attach_uefi">Attach uefi.img</string>
-    <string name="parse_attach_xbl_uefi">Attach xbl_config.img + uefi.img</string>
-    <string name="parse_attach_vendor_boot">Attach vendor_boot.img (MediaTek only)</string>
+    <string name="parse_attach_vendor_boot">Attach vendor_boot.img</string>
+    <string name="parse_attach_vendor_boot_staged">Replace vendor_boot.img (imported)</string>
     <string name="parse_url_title">Full package URL</string>
     <string name="parse_url_hint">Paste full OTA zip URL</string>
     <string name="parse_start">Start</string>
@@ -321,4 +321,11 @@
     <string name="fallback_label">Fallback route</string>
     <string name="fallback_none">None</string>
     <string name="field_fallback_to">fallback_to</string>
+    <!-- vivo/iQOO vendor_boot prompt -->
+    <string name="vivo_vendor_boot_prompt_title">vivo/iQOO Device Detected</string>
+    <string name="vivo_vendor_boot_prompt_message">This is a vivo/iQOO device: the vr.ko tag offsets are read from vendor_boot.img.\n\nWithout it only the built-in fixed offsets are available, and the attack will likely fail.</string>
+    <string name="vivo_vendor_boot_import">Import vendor_boot.img</string>
+    <string name="vivo_vendor_boot_imported">vendor_boot.img imported; vr.ko offsets will be read from it at run time</string>
+    <string name="vivo_vendor_boot_invalid">Not a vendor_boot image: the magic and size check failed. Pick the vendor_boot.img from the firmware - boot.img and init_boot.img are different partitions and cannot supply vr.ko offsets.</string>
+    <string name="vivo_vendor_boot_cancel">Cancel</string>
 </resources>
