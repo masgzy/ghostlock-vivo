@@ -295,6 +295,7 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
         ksudEntry: String?,
         symsTable: String?,
         safeMode: Boolean,
+        allowAnyKernel: Boolean,
         callback: IGhostlockCallback,
     ) {
         if (!running.compareAndSet(false, true)) {
@@ -342,6 +343,19 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                     put("TMPDIR", work.absolutePath)
                     symsFile?.let { put("IC_SYMS_FILE", it.absolutePath) }
                     ksud?.let { put("IC_KSUD", it.absolutePath) }
+                    /* IC_ALLOW_ANY_KERNEL: run an imported t98260 whose built-in
+                     * profile targets a different kernel. The staged ic-syms
+                     * table supplies this boot's slide, so the writes stay
+                     * aimed; without a table this is a blind override and the
+                     * log says so. */
+                    if (allowAnyKernel) {
+                        put("IC_ALLOW_ANY_KERNEL", "1")
+                        callback.onLog(
+                            "<t> IC_ALLOW_ANY_KERNEL=1: profile gate bypassed" +
+                                if (symsFile != null) " (slide from the staged ic-syms table)"
+                                else " (WARNING: no ic-syms table staged, the slide is guessed)",
+                        )
+                    }
                 }
                 callback.onLog("<t> launching t98260 (ksu mode)")
                 val process = ProcessBuilder(

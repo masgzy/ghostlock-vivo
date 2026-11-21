@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.os.Build
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import com.ghostlock.app.BuildConfig
@@ -70,8 +71,14 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         const val RunStateFileName = ".ghostlock_run_state.json"
         const val PREF_EXPLOIT_CHAIN = "exploit_chain"
         const val PREF_KSUD_ENTRY = "ksud_library_entry"
+        const val PrefTimerRootAllowAnyKernel = "timerroot_allow_any_kernel"
+        const val PrefLaunchManagerOnSuccess = "launch_manager_on_success"
         const val TIMER_ROOT_BINARY = "t98260.bin"
         const val TIMER_ROOT_SYMS = "ic-syms.txt"
+        /* An ic-syms table is a few tens of KiB of text; anything larger is a
+         * picked image and must go through the extractor. 2 MiB leaves room
+         * for verbose per-build tables. */
+        const val MAX_SYMS_IMPORT_BYTES = 2L * 1024 * 1024
         const val StatusMarker = "\u001eGLK_STATUS"
         const val StatusAck = "\u001eGLK_STATUS_ACK\n"
         const val StatusDisabled = "\u001eGLK_STATUS_DISABLED"
@@ -279,6 +286,7 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             binarySource = binarySource,
             symsRelease = symsRelease,
             ksudEntry = ksudLibraryChoice(),
+            allowAnyKernel = timerRootAllowAnyKernel(),
         )
     }
 
@@ -358,13 +366,92 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
     }
 
     override suspend fun importTimerRootSyms(uri: String): String? = withContext(Dispatchers.IO) {
-        val text = appContext.contentResolver.openInputStream(uri.toUri())
-            ?.bufferedReader()?.use { it.readText() }
-            ?: throw IOException("cannot open $uri")
-        val hasTarget = text.lineSequence().any { it.startsWith("__tracepoint_sys_exit=") }
-        if (!hasTarget) throw IOException("not an ic-syms table (no __tracepoint_sys_exit entry)")
-        File(filesDir, TIMER_ROOT_SYMS).writeText(text)
+        /* An ic-syms table is a small text file (tens of KiB). Reading it with
+ * readText() used to OOM the ART heap when a boot image (hundreds of MiB)
+ * was picked here by mistake - "Failed to allocate a 268501000 byte
+ * allocation" - so gate on the reported size first and refuse anything
+ * that cannot be a table, pointing at the extractor for real images. */
+        val declared = appContext.contentResolver
+            .query(uri.toUri(), arrayOf(OpenableColumns.SIZE), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+            }
+        if (declared != null && declared > MAX_SYMS_IMPORT_BYTES) {
+            throw IOException(
+                "picked file is ${declared} bytes; an ic-syms table is a small text file. " +
+                    "To use a boot/vendor_boot image, run 提取符号表 (parse) instead of import",
+            )
+        }
+        /* Stream line-by-line: validate while copying, never hold the whole
+ * document, and cap the accepted size defensively for providers that
+ * report no SIZE column. */
+        val target = File(filesDir, TIMER_ROOT_SYMS)
+        val staged = File(filesDir, "$TIMER_ROOT_SYMS.partial")
+        var foundTarget = false
+        var total = 0L
+        try {
+            appContext.contentResolver.openInputStream(uri.toUri())
+                ?.bufferedReader(Charsets.UTF_8)?.use { reader ->
+                    staged.outputStream().bufferedWriter(Charsets.UTF_8).use { writer ->
+                        while (true) {
+                            val line = reader.readLine() ?: break
+                            if (line.startsWith("__tracepoint_sys_exit=")) foundTarget = true
+                            total += line.length + 1
+                            if (total > MAX_SYMS_IMPORT_BYTES) {
+                                throw IOException(
+                                    "file exceeds ${MAX_SYMS_IMPORT_BYTES} bytes while reading; " +
+                                        "not an ic-syms table (use 提取符号表 for boot images)",
+                                )
+                            }
+                            writer.write(line)
+                            writer.write("\n")
+                        }
+                    }
+                } ?: throw IOException("cannot open $uri")
+            if (!foundTarget) {
+                throw IOException("not an ic-syms table (no __tracepoint_sys_exit entry)")
+            }
+            if (!staged.renameTo(target)) {
+                target.delete()
+                staged.copyTo(target, overwrite = true)
+            }
+        } finally {
+            staged.delete()
+        }
         TIMER_ROOT_SYMS
+    }
+
+    override fun timerRootAllowAnyKernel(): Boolean =
+        preferences.getBoolean(PrefTimerRootAllowAnyKernel, false)
+
+    override fun setTimerRootAllowAnyKernel(enabled: Boolean) {
+        preferences.edit { putBoolean(PrefTimerRootAllowAnyKernel, enabled) }
+    }
+
+    override fun launchManagerOnSuccess(): Boolean =
+        preferences.getBoolean(PrefLaunchManagerOnSuccess, true)
+
+    override fun setLaunchManagerOnSuccess(enabled: Boolean) {
+        preferences.edit { putBoolean(PrefLaunchManagerOnSuccess, enabled) }
+    }
+
+    override fun launchRootManager(): String? {
+        val pm = appContext.packageManager
+        val chosen = ManagerScanner.resolvePackages(preferences.getString(ManagerScanner.PREF_KEY, null))
+            .firstOrNull { pkg ->
+                runCatching { pm.getLaunchIntentForPackage(pkg) != null }.getOrDefault(false)
+            }
+            ?: ManagerScanner.scan(pm, appContext.packageName)
+                .firstOrNull { candidate ->
+                    runCatching { pm.getLaunchIntentForPackage(candidate.packageName) != null }.getOrDefault(false)
+                }?.packageName
+            ?: return null
+        val intent = pm.getLaunchIntentForPackage(chosen) ?: return null
+        return runCatching {
+            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            appContext.startActivity(intent)
+            chosen
+        }.getOrNull()
     }
 
     override suspend fun runExploitAsTimerRoot(onLog: (String) -> Unit): Int {
@@ -384,6 +471,7 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             ksudEntry = ksudLibraryChoice(),
             symsTable = syms,
             safeMode = safeModeEnabled,
+            allowAnyKernel = timerRootAllowAnyKernel(),
             onLog = onLog,
         )
     }

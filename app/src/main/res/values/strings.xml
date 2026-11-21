@@ -113,6 +113,11 @@
     <string name="timerroot_parse_label">Source</string>
     <string name="timerroot_parse_hint">boot.img / payload.bin / OTA zip path or URL</string>
     <string name="timerroot_parse_button">Parse ic-syms</string>
+    <string name="timerroot_allow_any_kernel_label">Allow any kernel (IC_ALLOW_ANY_KERNEL)</string>
+    <string name="timerroot_allow_any_kernel_summary">Run an imported t98260 whose built-in profile targets a different kernel. Stage an ic-syms table first: it supplies this boot's slide, so the writes stay aimed. Without a table the override is blind and can panic the kernel.</string>
+    <string name="timerroot_needs_shizuku">TimerRoot needs Shizuku running (the exploit reads tracefs, shell domain only)</string>
+    <string name="launch_manager_label">Open manager after rooting</string>
+    <string name="launch_manager_summary">Launch the selected root manager automatically once the chain completes successfully</string>
     <string name="timerroot_safety">Kernel exploit safety: reboot is the only clean rollback; a failed attempt can leave a stale timerqueue node until then. Only run on devices you own.</string>
     <string name="ksud_library_label">ksud library</string>
     <string name="ksud_library_auto">Auto (detected)</string>

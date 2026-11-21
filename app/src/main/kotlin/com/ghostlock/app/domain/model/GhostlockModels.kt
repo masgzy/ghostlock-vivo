@@ -31,6 +31,10 @@ data class TimerRootState(
     val symsRelease: String? = null,
     /** User's explicit libksud.so choice inside the manager APK ("auto" = null). */
     val ksudEntry: String? = null,
+    /** IC_ALLOW_ANY_KERNEL=1 for t98260: run an imported binary whose built-in
+     * profile does not match this kernel, relying on the staged ic-syms table
+     * for the slide. Only meaningful with a staged table. */
+    val allowAnyKernel: Boolean = false,
 )
 
 enum class TimerRootBinarySource { MISSING, EMBEDDED, IMPORTED }

@@ -93,6 +93,7 @@ class GhostlockViewModel(
         if (initialized) return
         initialized = true
         repository.setShizukuStatusListener { refreshAccessStatus() }
+        mutableState.update { it.copy(launchManagerOnSuccess = repository.launchManagerOnSuccess()) }
         viewModelScope.launch {
             refreshSnapshot()
             applyRecommendedShizuku()
@@ -963,7 +964,37 @@ class GhostlockViewModel(
                     timerRootBinarySource = state.binarySource,
                     timerRootSymsRelease = state.symsRelease,
                     ksudSelectedEntry = state.ksudEntry,
+                    timerRootAllowAnyKernel = state.allowAnyKernel,
                 )
+            }
+        }
+    }
+
+    /** IC_ALLOW_ANY_KERNEL gate for the TimerRoot chain; persisted, and the
+     * config sheet reflects it through refreshTimerRootState(). */
+    fun toggleTimerRootAllowAnyKernel(enabled: Boolean) {
+        repository.setTimerRootAllowAnyKernel(enabled)
+        mutableState.update { it.copy(timerRootAllowAnyKernel = enabled) }
+    }
+
+    /** Post-escalation convenience: auto-open the root manager when a chain
+     * finishes successfully. Both chains consult the same preference. */
+    fun toggleLaunchManagerOnSuccess(enabled: Boolean) {
+        repository.setLaunchManagerOnSuccess(enabled)
+        mutableState.update { it.copy(launchManagerOnSuccess = enabled) }
+    }
+
+    /** Best-effort follow-up after a successful run: launch the selected (or
+     * auto-resolved) root manager so the user lands on the manager screen
+     * instead of the log. Failures are logged, never fatal. */
+    private fun maybeLaunchRootManager() {
+        if (!repository.launchManagerOnSuccess()) return
+        viewModelScope.launch(Dispatchers.Main) {
+            val pkg = runCatching { repository.launchRootManager() }.getOrNull()
+            if (pkg != null) {
+                appendLog("[+] launched root manager: $pkg")
+            } else {
+                appendLog("[!] could not launch a root manager (none installed or blocked)")
             }
         }
     }
@@ -1023,6 +1054,7 @@ class GhostlockViewModel(
                 val code = runExploitUseCase(pair, useShizuku, ::appendLog)
                 appendLog(if (code == 0) "result: exploit completed" else "result: exploit failed (exit code=$code)")
                 appendLog("exit code=$code")
+                if (code == 0) maybeLaunchRootManager()
             } finally {
                 endOperation()
                 send(GhostlockEffect.KeepScreenAwake(false))
@@ -1038,14 +1070,47 @@ class GhostlockViewModel(
             onOpenTimerRootConfig()
             return
         }
+        /* Pre-flight the Shizuku gate the same way the GhostLock chain does:
+ * guide the user to start it (or grant) instead of failing inside the
+ * runner with a log-only error. */
+        val shizukuStatus = kernelSnapshot?.shizukuStatus ?: ShizukuStatus.NOT_RUNNING
+        if (shizukuStatus != ShizukuStatus.READY) {
+            when (shizukuStatus) {
+                ShizukuStatus.NOT_RUNNING -> {
+                    send(GhostlockEffect.Toast(R.string.timerroot_needs_shizuku))
+                    send(GhostlockEffect.OpenShizuku)
+                }
+                ShizukuStatus.PERMISSION_REQUIRED -> repository.requestShizukuPermission()
+                ShizukuStatus.NOT_REQUIRED, ShizukuStatus.READY -> Unit
+            }
+            return
+        }
         if (!beginOperation()) return
         send(GhostlockEffect.KeepScreenAwake(true))
         appendLog("==== start TimerRoot (CVE-2026-98260) ====")
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val code = repository.runExploitAsTimerRoot(::appendLog)
+                val logTail = StringBuilder()
+                val code = repository.runExploitAsTimerRoot { line ->
+                    logTail.append(line).append('\n')
+                    appendLog(line)
+                }
                 appendLog(if (code == 0) "result: chain completed" else "result: chain failed (exit code=$code)")
                 appendLog("exit code=$code")
+                if (code == 0) {
+                    maybeLaunchRootManager()
+                } else if (logTail.contains("does not match profile")) {
+                    /* t98260 refused to run: its built-in kernel profile does
+                     * not cover this device. The two ways out are a matching
+                     * t98260 build, or the explicit IC_ALLOW_ANY_KERNEL
+                     * override with a staged ic-syms table. */
+                    appendLog(
+                        "<t> hint: this t98260 was built for a different kernel; " +
+                            "either import a matching build, or stage a symbol table and enable " +
+                            "IC_ALLOW_ANY_KERNEL in the TimerRoot config",
+                    )
+                    onOpenTimerRootConfig()
+                }
             } finally {
                 endOperation()
                 send(GhostlockEffect.KeepScreenAwake(false))

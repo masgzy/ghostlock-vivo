@@ -113,6 +113,11 @@
     <string name="timerroot_parse_label">来源</string>
     <string name="timerroot_parse_hint">boot.img / payload.bin / OTA zip 路径或 URL</string>
     <string name="timerroot_parse_button">解析 ic-syms</string>
+    <string name="timerroot_allow_any_kernel_label">允许任意内核（IC_ALLOW_ANY_KERNEL）</string>
+    <string name="timerroot_allow_any_kernel_summary">运行内置 profile 不匹配本机内核的 t98260。请先暂存 ic-syms 符号表：符号表提供本次开机的地址滑移，写入仍然有据可依；没有符号表的盲目覆盖可能直接 panic。</string>
+    <string name="timerroot_needs_shizuku">TimerRoot 需要 Shizuku 运行中（利用链要读 tracefs，仅 shell 域可以）</string>
+    <string name="launch_manager_label">提权后打开管理器</string>
+    <string name="launch_manager_summary">利用链成功完成后自动启动选定的 root 管理器</string>
     <string name="timerroot_safety">内核利用安全提示：重启是唯一干净的回退方式；失败的尝试可能残留失效的 timerqueue 节点，重启前其他应用可能崩溃。仅在你拥有的设备上运行。</string>
     <string name="ksud_library_label">ksud 库文件</string>
     <string name="ksud_library_auto">自动（识别）</string>

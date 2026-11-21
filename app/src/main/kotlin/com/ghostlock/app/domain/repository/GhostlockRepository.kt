@@ -56,8 +56,23 @@ interface GhostlockRepository {
     /** Imports a ready-made ic-syms table (SAF uri). */
     suspend fun importTimerRootSyms(uri: String): String?
 
+    /** IC_ALLOW_ANY_KERNEL for the TimerRoot chain (see TimerRootState). */
+    fun timerRootAllowAnyKernel(): Boolean
+
+    fun setTimerRootAllowAnyKernel(enabled: Boolean)
+
     /** Runs the TimerRoot (CVE-2026-98260) chain through Shizuku. */
     suspend fun runExploitAsTimerRoot(onLog: (String) -> Unit): Int
+
+    /** Launch the selected (or auto-resolved) root manager's main activity.
+     * Returns the launched package, or null when nothing could be started. */
+    fun launchRootManager(): String?
+
+    /** Open the escalation success follow-up: launch the root manager when the
+     * user enabled it. Default true. */
+    fun launchManagerOnSuccess(): Boolean
+
+    fun setLaunchManagerOnSuccess(enabled: Boolean)
 
     /** All installed non-system apps, compatible-first ordering. */
     suspend fun installedManagers(): List<ManagerScanner.Candidate>

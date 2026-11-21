@@ -192,6 +192,10 @@ data class GhostlockUiState(
     val timerRootBinaryAvailable: Boolean = false,
     val timerRootBinarySource: TimerRootBinarySource = TimerRootBinarySource.MISSING,
     val timerRootSymsRelease: String? = null,
+    /** IC_ALLOW_ANY_KERNEL gate for the TimerRoot chain. */
+    val timerRootAllowAnyKernel: Boolean = false,
+    /** Auto-open the root manager after a successful escalation (both chains). */
+    val launchManagerOnSuccess: Boolean = true,
 )
 
 enum class DialogType { NONE, LIST, INPUT, CONFIRM, NOTICE }
@@ -226,6 +230,8 @@ interface GhostlockActions {
     fun onPickTimerRootSyms()
     fun onImportTimerRootBinary(uri: String)
     fun onImportTimerRootSyms(uri: String)
+    fun onSetTimerRootAllowAnyKernel(enabled: Boolean)
+    fun onSetLaunchManagerOnSuccess(enabled: Boolean)
     fun onParseTimerRootSyms(input: String)
     fun onDialogItemSelected(index: Int)
     fun onDialogInputChange(value: String)
@@ -940,6 +946,12 @@ private fun ControlPanel(
                 title = stringResource(R.string.safe_mode_label),
                 summary = stringResource(R.string.safe_mode_summary),
             )
+            SwitchPreference(
+                checked = state.launchManagerOnSuccess,
+                onCheckedChange = actions::onSetLaunchManagerOnSuccess,
+                title = stringResource(R.string.launch_manager_label),
+                summary = stringResource(R.string.launch_manager_summary),
+            )
             /* PROFILE-SUGGEST-01: the profile suggestion seeds the toggle but no
              * longer hides it; an explicit user choice overrides either way. */
             SwitchPreference(
@@ -1426,6 +1438,12 @@ private fun TimerRootConfigSheet(
                     summary = state.timerRootSymsRelease
                         ?: stringResource(R.string.timerroot_syms_missing),
                     onClick = actions::onPickTimerRootSyms,
+                )
+                SwitchPreference(
+                    checked = state.timerRootAllowAnyKernel,
+                    onCheckedChange = actions::onSetTimerRootAllowAnyKernel,
+                    title = stringResource(R.string.timerroot_allow_any_kernel_label),
+                    summary = stringResource(R.string.timerroot_allow_any_kernel_summary),
                 )
                 TextField(
                     value = timerRootSymsInput,
