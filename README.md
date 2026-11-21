@@ -23,7 +23,7 @@ GhostLock 的 vivo 适配 fork：在支持的 Android 内核上获取临时 root
   - W2b 每任务标签清除，标签偏移从 `vendor_boot.img` 的 `lib/modules/vr.ko` 实时探测（`--vendor-boot`）。
 - **ic-syms 符号表解析**：提取器新增 `--format ic-syms`，从 boot.img / OTA ZIP / URL 生成 t98260 需要的 66 符号表。
 - **libksud.so 手动选择**：先用内容签名（`late-load command triggered!`）自动识别，再允许在管理器 APK 的 `lib/arm64-v8a` 库列表中手动指定任意 `.so` 作为 ksud。
-- **SukiSU Nova 支持**：随机命名的 `lib<random>.so` 通过内容签名检测；内置 6.1.145（the target vivo 6.1.145 firmware）等 vivo 配置。
+- **SukiSU Nova 支持**：随机命名的 `lib<random>.so` 通过内容签名检测；内置 6.1.145（vivo 厂商固件）等配置。
 
 ## 使用
 
