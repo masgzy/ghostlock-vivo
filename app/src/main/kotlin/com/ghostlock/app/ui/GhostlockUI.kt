@@ -65,6 +65,7 @@ import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.ExecutionFieldValue
 import com.ghostlock.app.domain.model.ExploitChain
 import com.ghostlock.app.domain.model.KsudLibraryEntry
+import com.ghostlock.app.domain.model.TimerRootArchivedTable
 import com.ghostlock.app.domain.model.TimerRootBinarySource
 import com.ghostlock.app.domain.model.ProfileFieldNode
 import com.ghostlock.app.domain.model.ShizukuStatus
@@ -191,6 +192,8 @@ data class GhostlockUiState(
     val timerRootConfigVisible: Boolean = false,
     /** TimerRoot 配置 → 加载配置 子页。 */
     val timerRootLoadConfigVisible: Boolean = false,
+    /** TimerRoot 配置 → 加载配置 → 指定加载 子页（radio 列表）。 */
+    val timerRootTablePickerVisible: Boolean = false,
     /** TimerRoot 配置 → 编辑配置 子页。 */
     val timerRootEditVisible: Boolean = false,
     /** TimerRoot 配置 → 配置文档 子页（占位）。 */
@@ -205,6 +208,8 @@ data class GhostlockUiState(
     val timerRootSymsSymbols: Int = 0,
     val timerRootSymsGeometryKeys: Int = 0,
     val timerRootSymsGeometryEssential: Int = 0,
+    /** Archived tables of the 98260 chain (加载配置 → 指定加载). */
+    val timerRootTables: List<TimerRootArchivedTable> = emptyList(),
     /** IC_ALLOW_ANY_KERNEL gate for the TimerRoot chain. */
     val timerRootAllowAnyKernel: Boolean = false,
     /** Auto-open the root manager after a successful escalation (both chains). */
@@ -251,6 +256,11 @@ interface GhostlockActions {
     fun onCloseTimerRootConfig()
     fun onOpenTimerRootLoadConfig()
     fun onCloseTimerRootLoadConfig()
+    /** 加载配置 → 指定加载：radio 列表（自动 + 存档表）。 */
+    fun onOpenTimerRootTablePicker()
+    fun onCloseTimerRootTablePicker()
+    /** null = 自动（按本机内核匹配存档表），非空 = 指定加载该表。 */
+    fun onSelectTimerRootTable(release: String?)
     fun onOpenTimerRootEdit()
     fun onCloseTimerRootEdit()
     fun onTimerRootFieldChanged(index: Int, value: String)
@@ -332,6 +342,7 @@ internal sealed interface GhostlockScreen : NavKey {
     data object AdvancedOverride : GhostlockScreen
     data object TimerRootConfig : GhostlockScreen
     data object TimerRootLoadConfig : GhostlockScreen
+    data object TimerRootTablePicker : GhostlockScreen
     data object TimerRootEdit : GhostlockScreen
     data object TimerRootDocs : GhostlockScreen
 }
@@ -343,7 +354,10 @@ internal fun navigationPath(state: GhostlockUiState): List<GhostlockScreen> {
      * 参数配置); the same flag drives both. */
     if (state.timerRootConfigVisible && !state.advancedScreenVisible) {
         path += GhostlockScreen.TimerRootConfig
-        if (state.timerRootLoadConfigVisible) path += GhostlockScreen.TimerRootLoadConfig
+        if (state.timerRootLoadConfigVisible) {
+            path += GhostlockScreen.TimerRootLoadConfig
+            if (state.timerRootTablePickerVisible) path += GhostlockScreen.TimerRootTablePicker
+        }
         if (state.timerRootEditVisible) path += GhostlockScreen.TimerRootEdit
         if (state.timerRootDocsVisible) path += GhostlockScreen.TimerRootDocs
         return path
@@ -356,7 +370,10 @@ internal fun navigationPath(state: GhostlockUiState): List<GhostlockScreen> {
     }
     if (state.timerRootConfigVisible) {
         path += GhostlockScreen.TimerRootConfig
-        if (state.timerRootLoadConfigVisible) path += GhostlockScreen.TimerRootLoadConfig
+        if (state.timerRootLoadConfigVisible) {
+            path += GhostlockScreen.TimerRootLoadConfig
+            if (state.timerRootTablePickerVisible) path += GhostlockScreen.TimerRootTablePicker
+        }
         if (state.timerRootEditVisible) path += GhostlockScreen.TimerRootEdit
         if (state.timerRootDocsVisible) path += GhostlockScreen.TimerRootDocs
         return path
@@ -402,6 +419,7 @@ private fun closeScreen(screen: GhostlockScreen, actions: GhostlockActions) {
         GhostlockScreen.AdvancedOverride -> actions.onCloseAdvancedOverrides()
         GhostlockScreen.TimerRootConfig -> actions.onCloseTimerRootConfig()
         GhostlockScreen.TimerRootLoadConfig -> actions.onCloseTimerRootLoadConfig()
+        GhostlockScreen.TimerRootTablePicker -> actions.onCloseTimerRootTablePicker()
         GhostlockScreen.TimerRootEdit -> actions.onCloseTimerRootEdit()
         GhostlockScreen.TimerRootDocs -> actions.onCloseTimerRootDocs()
     }
@@ -482,6 +500,9 @@ internal fun GhostlockApp(
                     }
                     entry<GhostlockScreen.TimerRootLoadConfig>(swipeDismiss = swipeBack) {
                         TimerRootLoadConfigScreen(state = state, actions = actions)
+                    }
+                    entry<GhostlockScreen.TimerRootTablePicker>(swipeDismiss = swipeBack) {
+                        TimerRootTablePickerScreen(state = state, actions = actions)
                     }
                     entry<GhostlockScreen.TimerRootEdit>(swipeDismiss = swipeBack) {
                         TimerRootEditScreen(state = state, actions = actions)

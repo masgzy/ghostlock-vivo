@@ -12,6 +12,7 @@ internal class BuiltinProfileCatalog(context: Context) {
 
     private data class Entry(
         val release: String,
+        val file: String,
         val recommendShizuku: Boolean,
         val fields: Map<String, Long>,
     )
@@ -34,6 +35,22 @@ internal class BuiltinProfileCatalog(context: Context) {
         entries.associate { it.release to it.fields }
     }
 
+    /**
+     * The bundled document text of an exact release, includes expanded —
+     * the authority for normalizing a parsed profile against its builtin
+     * twin (see AndroidGhostlockRepository.canonicalizeParsedEntries).
+     * Templates are authoring scaffolds and never served here.
+     */
+    fun documentFor(release: String): String? {
+        if (isTemplate(release)) return null
+        val entry = entries.firstOrNull { it.release == release } ?: return null
+        return rawDocuments.getOrPut(release) {
+            readAsset("$BuiltinDirectory/${entry.file}").orEmpty()
+        }.takeIf { it.isNotBlank() }
+    }
+
+    private val rawDocuments = mutableMapOf<String, String>()
+
     private fun loadEntries(): List<Entry> = runCatching {
         val index = readAsset("$BuiltinDirectory/index.conf")
             ?.let { HoconSupport.parseValue(it).asValueMap() } ?: return emptyList()
@@ -46,7 +63,7 @@ internal class BuiltinProfileCatalog(context: Context) {
             val profile = readAsset("$BuiltinDirectory/$file")
                 ?.let { HoconSupport.parseValue(it).asValueMap() } ?: return@mapNotNull null
             val fields = flatten(profile)
-            Entry(release, recommendShizuku = fields["recommend_shizuku"] == 1L, fields = fields)
+            Entry(release, file, recommendShizuku = fields["recommend_shizuku"] == 1L, fields = fields)
         }
     }.getOrDefault(emptyList())
 

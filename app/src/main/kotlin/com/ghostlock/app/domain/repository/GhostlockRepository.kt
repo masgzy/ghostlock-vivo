@@ -66,6 +66,23 @@ interface GhostlockRepository {
     /** Imports a ready-made ic-syms table (SAF uri). */
     suspend fun importTimerRootSyms(uri: String): String?
 
+    /**
+     * Copies one archived table (see TimerRootState.tables) over the live
+     * `ic-syms.txt`: the explicit "指定加载" of the 98260 加载配置 page. Run,
+     * edit and export all read the live table, so this is the equivalent of
+     * loading a profile in the GhostLock chain. Returns false when the
+     * archived table is missing or the copy failed.
+     */
+    suspend fun stageTimerRootTable(release: String): Boolean
+
+    /**
+     * Automatic table selection of the 98260 加载配置 page: stages the archive
+     * whose kernel exactly matches [release] (normally the device's own). A
+     * device kernel with no archive leaves the staged table untouched. Returns
+     * the release that was staged, or null.
+     */
+    suspend fun autoMatchTimerRootTable(release: String?): String?
+
     /** Publishes the staged ic-syms table into Download/ and returns the
      * content uri (for sharing). Throws when no table is staged. */
     suspend fun publishTimerRootSyms(): String

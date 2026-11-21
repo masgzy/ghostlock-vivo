@@ -199,6 +199,10 @@ private fun GhostlockRoute(
             override fun onCloseTimerRootConfig() = viewModel.onCloseTimerRootConfig()
             override fun onOpenTimerRootLoadConfig() = viewModel.onOpenTimerRootLoadConfig()
             override fun onCloseTimerRootLoadConfig() = viewModel.onCloseTimerRootLoadConfig()
+            override fun onOpenTimerRootTablePicker() = viewModel.onOpenTimerRootTablePicker()
+            override fun onCloseTimerRootTablePicker() = viewModel.onCloseTimerRootTablePicker()
+            override fun onSelectTimerRootTable(release: String?) =
+                viewModel.onSelectTimerRootTable(release)
             override fun onOpenTimerRootEdit() = viewModel.onOpenTimerRootEdit()
             override fun onCloseTimerRootEdit() = viewModel.onCloseTimerRootEdit()
             override fun onTimerRootFieldChanged(index: Int, value: String) =

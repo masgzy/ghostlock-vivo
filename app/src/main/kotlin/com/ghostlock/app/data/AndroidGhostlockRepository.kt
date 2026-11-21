@@ -15,6 +15,7 @@ import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.DebugSettings
 import com.ghostlock.app.domain.model.ExploitChain
 import com.ghostlock.app.domain.model.KsudLibraryEntry
+import com.ghostlock.app.domain.model.TimerRootArchivedTable
 import com.ghostlock.app.domain.model.TimerRootBinarySource
 import com.ghostlock.app.domain.model.TimerRootState
 import com.ghostlock.app.domain.model.KernelSnapshot
@@ -106,6 +107,24 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         const val PrefLaunchManagerOnSuccess = "launch_manager_on_success"
         const val TIMER_ROOT_BINARY = "t98260.bin"
         const val TIMER_ROOT_SYMS = "ic-syms.txt"
+        /** Archive of every parsed/imported ic-syms table, the 98260 chain's
+         * equivalent of the GhostLock saved-profile list. */
+        const val TimerRootTablesDirectoryName = "timerroot_tables"
+
+        /* Parsed-profile normalization (see canonicalizeParsedEntries): the
+         * extractor measures some sections per image, others it cannot derive
+         * at all. When the parsed release has a bundled twin, the sections the
+         * extractor cannot measure come from the twin wholesale, the measured
+         * ones keep the parsed values (builtin as the base layer), and flags
+         * follow the twin — otherwise a stored "copy_size = 136"-style
+         * half-truth would override the verified builtin at merge time. */
+        val parsedAuthoritativeSections = setOf("offset", "task_struct")
+        val bundledAuthoritativeSections = setOf(
+            "execution", "route", "fallback", "cred", "kernelsnitch", "vr_guard",
+        )
+        val bundledAuthoritativeFlags = setOf(
+            "recommend_shizuku", "recommend_vr_guard", "kernel_major", "schema_version",
+        )
         /** The CI-built generic 98260 core, packaged as a jniLib (the file
          * is a static PIE executable; the name only makes the APK installer
          * extract it). Staged to /data/local/tmp by the Shizuku runner. */
@@ -124,6 +143,8 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
     private val preferences get() =
         appContext.getSharedPreferences("ghostlock_prefs", Context.MODE_PRIVATE)
     private val offsetsFile get() = File(filesDir, OffsetsFileName)
+    /** Archive directory of parsed/imported ic-syms tables (98260 chain). */
+    private val timerRootTablesDir get() = File(filesDir, TimerRootTablesDirectoryName)
     private val builtinProfiles = BuiltinProfileCatalog(appContext)
     private val assetConfigLoader = AssetConfigLoader(appContext)
     private val userProfileStore = UserProfileStore(
@@ -330,6 +351,7 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             symsSymbols = summary?.symbols ?: 0,
             symsGeometryKeys = summary?.geometryKeys ?: 0,
             symsGeometryEssential = summary?.geometryEssential ?: 0,
+            tables = listTimerRootTables(),
             ksudEntry = ksudLibraryChoice(),
             allowAnyKernel = timerRootAllowAnyKernel(),
         )
@@ -476,6 +498,10 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
                     .firstOrNull { it.startsWith("# build=") }
                     ?.removePrefix("# build=")
                     ?: return@withContext ParseResult.Failed(code, "table carries no build header")
+                /* Keep every successfully parsed table in the archive: the
+                 * 98260 加载配置 page lists them for explicit loading, like
+                 * the GhostLock saved-profile list. */
+                archiveTimerRootTable(out)
                 ParseResult.Parsed(listOf(release), emptySet(), TIMER_ROOT_SYMS)
             } finally {
                 tempBoot?.delete()
@@ -554,10 +580,79 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
                 target.delete()
                 staged.copyTo(target, overwrite = true)
             }
+            /* Imports join the parse archive under the same rules, so an
+             * imported table is loadable again after another one is staged. */
+            archiveTimerRootTable(target)
         } finally {
             staged.delete()
         }
         TIMER_ROOT_SYMS
+    }
+
+    override suspend fun stageTimerRootTable(release: String): Boolean = withContext(Dispatchers.IO) {
+        val match = listTimerRootTables().firstOrNull { it.release == release }
+            ?: return@withContext false
+        val source = File(timerRootTablesDir, match.fileName)
+        if (!source.isFile) return@withContext false
+        runCatching {
+            val target = File(filesDir, TIMER_ROOT_SYMS)
+            val staged = File(filesDir, "$TIMER_ROOT_SYMS.partial")
+            source.copyTo(staged, overwrite = true)
+            if (!staged.renameTo(target)) {
+                target.delete()
+                staged.copyTo(target, overwrite = true)
+            }
+            staged.delete()
+            true
+        }.getOrDefault(false)
+    }
+
+    override suspend fun autoMatchTimerRootTable(release: String?): String? = withContext(Dispatchers.IO) {
+        if (release.isNullOrBlank()) return@withContext null
+        val match = listTimerRootTables().firstOrNull { it.release == release }
+            ?: return@withContext null
+        if (stageTimerRootTable(match.release)) match.release else null
+    }
+
+    /** Archived tables, newest parse first, same kernel never twice. */
+    private fun listTimerRootTables(): List<TimerRootArchivedTable> = runCatching {
+        timerRootTablesDir.listFiles { file ->
+            file.isFile && file.name.endsWith(".syms") && !file.name.endsWith(".partial")
+        }?.mapNotNull { file ->
+            val summary = runCatching { TimerRootTable.summarize(file.readText()) }.getOrNull()
+            val release = summary?.release?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            TimerRootArchivedTable(
+                release = release,
+                symbols = summary.symbols,
+                geometryKeys = summary.geometryKeys,
+                geometryEssential = summary.geometryEssential,
+                fileName = file.name,
+            )
+        }?.sortedByDescending { it.fileName }
+            ?.distinctBy { it.release }
+            ?: emptyList()
+    }.getOrDefault(emptyList())
+
+    /**
+     * Copies [source] into the table archive under its `# build=` kernel
+     * (atomically: write .partial, rename). Best effort by design — the
+     * parse result never depends on the archive succeeding.
+     */
+    private fun archiveTimerRootTable(source: File) {
+        runCatching {
+            val release = TimerRootTable.summarize(source.readText()).release
+                ?.takeIf { it.isNotEmpty() } ?: return@runCatching
+            val safe = release.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            timerRootTablesDir.mkdirs()
+            val staged = File(timerRootTablesDir, "$safe.syms.partial")
+            val target = File(timerRootTablesDir, "$safe.syms")
+            staged.writeText(source.readText())
+            if (!staged.renameTo(target)) {
+                target.delete()
+                staged.copyTo(target, overwrite = true)
+                staged.delete()
+            }
+        }
     }
 
     override fun timerRootAllowAnyKernel(): Boolean =
@@ -816,21 +911,30 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             if (code != 0 || !parsedFile.isFile) return ParseResult.Failed(code)
             val document = parsedFile.readText()
             val fresh = parseEntries(document) ?: return ParseResult.Failed(code, "invalid extractor output")
-            /* Parsed reports are stored as-is, even when they match a bundled
-             * profile; loading decides whether they take effect. */
+            /* Parsed reports are normalized (see canonicalizeParsedEntries)
+             * but otherwise stored even when they match a bundled profile;
+             * loading decides whether they take effect. */
             val filtered = fresh.mapNotNull { it.asValueMap() }
                 .filter { (it["release"] as? String).orEmpty().isNotEmpty() }
             if (filtered.isEmpty()) return ParseResult.AlreadyPresent
+            /* Normalize against the bundled twin before anything is stored or
+             * compared: the extractor's report carries null placeholders and
+             * fallback guesses for the sections it cannot measure, and a
+             * stored half-truth (copy_size = 136, collisions = 4, a
+             * tcp_zerocopy route group) would override the verified builtin
+             * at merge time. */
+            val canonical = canonicalizeParsedEntries(filtered)
+            val documentText = canonical.joinToString("\n\n") { HoconSupport.render(it) }
             val releases = freshReleases(filtered)
             val missing = missingSidecarFields(filtered)
             val overlaps = releases.filter { userProfileStore.containsRelease(it) }
             val name = parsedDocumentName(releases)
             if (!overwrite && overlaps.isNotEmpty()) {
-                pendingParsedDocument = PendingParsedDocument(name, document, releases, missing)
+                pendingParsedDocument = PendingParsedDocument(name, documentText, releases, missing)
                 return ParseResult.RequiresOverwrite(overlaps, missing)
             }
             dropReplacedDocuments(releases)
-            userProfileStore.save(name, document)
+            userProfileStore.save(name, documentText)
             ParseResult.Parsed(releases, missing, name)
         } catch (error: CancellationException) {
             throw error
@@ -1535,6 +1639,67 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         val releases: List<String>,
         val missing: Set<String>,
     )
+
+    /**
+     * Normalizes parsed extractor output before it is stored as a user
+     * document. Null leaves (fields the extractor could not measure, like
+     * the cred ref images or kernel_phys_offset) are dropped outright, and
+     * when the release has a bundled twin the sections the extractor cannot
+     * derive (execution / route / fallback / cred / kernelsnitch / vr_guard
+     * and the recommendation flags) are taken from the twin wholesale — the
+     * stored document then reads like the bundled one, instead of carrying
+     * fallback guesses that override the twin at merge time. The measured
+     * sections (offset / task_struct) keep the parsed values on top of the
+     * twin's base, kernel_phys_load falls back to the twin when the parse
+     * did not supply one, and keys only the parsed report carries survive
+     * as-is. Entries without a bundled twin are only null-dropped.
+     */
+    private fun canonicalizeParsedEntries(entries: List<ValueMap>): List<ValueMap> =
+        entries.map { entry ->
+            val release = (entry["release"] as? String).orEmpty()
+            val cleaned = dropNullLeaves(entry.copyValue()).asValueMap() ?: valueMapOf()
+            val builtin = builtinProfiles.documentFor(release)
+                ?.let { HoconSupport.parseValue(it).asValueMap() }
+            if (builtin == null) {
+                cleaned
+            } else {
+                bundledAuthoritativeSections.forEach { section ->
+                    builtin[section].asValueMap()?.let { branch ->
+                        cleaned[section] = branch.copyValue()
+                    } ?: cleaned.remove(section)
+                }
+                bundledAuthoritativeFlags.forEach { flag ->
+                    (builtin[flag] as? Number)?.let { cleaned[flag] = it.toLong() }
+                }
+                parsedAuthoritativeSections.forEach { section ->
+                    val base = builtin[section].asValueMap()
+                        ?.let { asMutableMap(it.copyValue().asValueMap() ?: valueMapOf()) }
+                        ?: valueMapOf()
+                    val measured = cleaned[section].asValueMap()
+                    cleaned[section] = deepMergeValues(base, measured)
+                }
+                if (cleaned["kernel_phys_load"] == null) {
+                    (builtin["kernel_phys_load"] as? Number)?.let { cleaned["kernel_phys_load"] = it.toLong() }
+                }
+                cleaned
+            }
+        }
+
+    /** Recursively removes null leaves; a null is an unmeasured field, and a
+     * stored null both renders as noise and blocks nothing at merge time. */
+    private fun dropNullLeaves(value: Any?): Any? = when (value) {
+        is Map<*, *> -> ValueMap().apply {
+            value.forEach { (key, item) ->
+                dropNullLeaves(item)?.let { put(key.toString(), it) }
+            }
+        }
+
+        is List<*> -> ValueList().apply {
+            value.forEach { item -> dropNullLeaves(item)?.let(::add) }
+        }
+
+        else -> value
+    }
 
     /**
      * Fields a parsed profile still lacks that only an xbl_config FDT or uefi

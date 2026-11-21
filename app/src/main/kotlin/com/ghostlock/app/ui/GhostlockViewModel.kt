@@ -1019,10 +1019,11 @@ class GhostlockViewModel(
                 )
             } catch (error: CancellationException) {
                 throw error
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
                 /* Nothing in the parse funnel may take the process down: an
-                 * unexpected failure is a log line and a notice dialog. */
-                appendLog("parse error: ${error.message}")
+                 * unexpected failure — including Errors like OOM — is a log
+                 * line and a notice dialog, never a crash. */
+                appendLog("parse error: ${error.message ?: error.javaClass.simpleName}")
                 appendLog("result: parse failed")
                 showNotice(R.string.parse_result_title, R.string.parse_failed)
             } finally {
@@ -1048,8 +1049,8 @@ class GhostlockViewModel(
                 promptAttach()
             } catch (error: CancellationException) {
                 throw error
-            } catch (error: Exception) {
-                appendLog("parse error: ${error.message}")
+            } catch (error: Throwable) {
+                appendLog("parse error: ${error.message ?: error.javaClass.simpleName}")
                 appendLog("result: parse failed")
                 showNotice(R.string.parse_result_title, R.string.parse_failed)
             }
@@ -1095,8 +1096,8 @@ class GhostlockViewModel(
                 handleTimerRootParseResult(repository.parseTimerRootSyms(source, ::appendLog))
             } catch (error: CancellationException) {
                 throw error
-            } catch (error: Exception) {
-                appendLog("parse error: ${error.message}")
+            } catch (error: Throwable) {
+                appendLog("parse error: ${error.message ?: error.javaClass.simpleName}")
                 appendLog("result: parse failed")
                 showNotice(R.string.parse_result_title, R.string.parse_failed)
             } finally {
@@ -1165,6 +1166,7 @@ class GhostlockViewModel(
                     timerRootSymsSymbols = state.symsSymbols,
                     timerRootSymsGeometryKeys = state.symsGeometryKeys,
                     timerRootSymsGeometryEssential = state.symsGeometryEssential,
+                    timerRootTables = state.tables,
                     ksudSelectedEntry = state.ksudEntry,
                     timerRootAllowAnyKernel = state.allowAnyKernel,
                 )
@@ -1351,7 +1353,51 @@ class GhostlockViewModel(
     }
 
     fun onCloseTimerRootLoadConfig() {
-        mutableState.update { it.copy(timerRootLoadConfigVisible = false) }
+        mutableState.update {
+            it.copy(
+                timerRootLoadConfigVisible = false,
+                timerRootTablePickerVisible = false,
+            )
+        }
+    }
+
+    /* ---- 加载配置 → 指定加载（radio 列表：自动 + 存档表） ---- */
+
+    fun onOpenTimerRootTablePicker() {
+        mutableState.update { it.copy(timerRootTablePickerVisible = true) }
+        viewModelScope.launch(Dispatchers.IO) { refreshTimerRootState() }
+    }
+
+    fun onCloseTimerRootTablePicker() {
+        mutableState.update { it.copy(timerRootTablePickerVisible = false) }
+    }
+
+    /**
+     * null = 自动：按本机内核在存档中精确匹配，无匹配时保持当前暂存表；
+     * 非空 = 把该内核的存档表复制为活表（run / 编辑 / 导出都读活表，等效
+     * GhostLock 的加载配置）。选中态用内容比对，不持久化偏好。
+     */
+    fun onSelectTimerRootTable(release: String?) {
+        if (release == null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val staged = repository.autoMatchTimerRootTable(kernelSnapshot?.kernelRelease)
+                if (staged != null) {
+                    appendLog("ic-syms table loaded: $staged (auto)")
+                } else {
+                    appendLog("ic-syms: no archived table matches ${kernelSnapshot?.kernelRelease ?: "this kernel"}; keeping the staged table")
+                }
+                refreshTimerRootState()
+            }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (repository.stageTimerRootTable(release)) {
+                appendLog("ic-syms table loaded: $release")
+                refreshTimerRootState()
+            } else {
+                send(GhostlockEffect.Toast(R.string.timerroot_pick_failed))
+            }
+        }
     }
 
     fun onOpenTimerRootDocs() {
@@ -1413,6 +1459,14 @@ class GhostlockViewModel(
             val summary = TimerRootTable.summarize(edited)
             if (!summary.hasTracepointTarget) {
                 appendLog("timerroot edit rejected: no __tracepoint_sys_exit value")
+                send(GhostlockEffect.Toast(R.string.timerroot_edit_invalid))
+                return@launch
+            }
+            /* Every editable value must stay a hexadecimal number ("0x108"
+             * style); a stray edit writes garbage into the table otherwise. */
+            val nonHex = state.value.timerRootEditFields.firstOrNull { !isTimerRootHexField(it.value) }
+            if (nonHex != null) {
+                appendLog("timerroot edit rejected: ${nonHex.label} is not a hexadecimal value")
                 send(GhostlockEffect.Toast(R.string.timerroot_edit_invalid))
                 return@launch
             }
@@ -2128,6 +2182,15 @@ class GhostlockViewModel(
                     showNotice(R.string.parse_result_title, parseFailureToast(result.code))
                 }
             }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            /* Nothing in the parse funnel may take the process down: an OOM is
+             * an Error, not an Exception, and an uncaught one in this launch
+             * block used to kill the app mid-download with no log at all. */
+            appendLog("parse error: ${error.message ?: error.javaClass.simpleName}")
+            appendLog("result: parse failed")
+            showNotice(R.string.parse_result_title, R.string.parse_failed)
         } finally {
             endOperation()
         }

@@ -21,6 +21,18 @@ data class KsudLibraryEntry(
     val fileName: String get() = zipPath.substringAfterLast('/')
 }
 
+/** One archived ic-syms table in filesDir/timerroot_tables (98260 加载配置). */
+data class TimerRootArchivedTable(
+    /** `# build=` banner of the archived table (its kernel). */
+    val release: String,
+    /** Symbol/geometry stats, same shape as the staged-table banner. */
+    val symbols: Int = 0,
+    val geometryKeys: Int = 0,
+    val geometryEssential: Int = 0,
+    /** Stored file name inside the archive directory. */
+    val fileName: String,
+)
+
 /** TimerRoot chain status shown by the config screen. */
 data class TimerRootState(
     val chain: ExploitChain = ExploitChain.GHOSTLOCK,
@@ -36,6 +48,8 @@ data class TimerRootState(
     val symsSymbols: Int = 0,
     val symsGeometryKeys: Int = 0,
     val symsGeometryEssential: Int = 0,
+    /** Archived tables the 加载配置 page offers for explicit loading. */
+    val tables: List<TimerRootArchivedTable> = emptyList(),
     /** User's explicit libksud.so choice inside the manager APK ("auto" = null). */
     val ksudEntry: String? = null,
     /** IC_ALLOW_ANY_KERNEL=1 for t98260: run an imported binary whose built-in

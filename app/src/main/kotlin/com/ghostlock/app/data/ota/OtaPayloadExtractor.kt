@@ -1,12 +1,15 @@
 package com.ghostlock.app.data.ota
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import io.airlift.compress.zstd.ZstdInputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
-import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
+import java.io.OutputStream
 import java.io.RandomAccessFile
 import java.util.Locale
 import kotlin.math.min
@@ -14,6 +17,14 @@ import kotlin.math.min
 /**
  * High-performance streaming OTA partition extractor in pure Kotlin.
  * Downloads only the payload metadata and the blocks needed for boot and xbl_config.
+ *
+ * Memory model: every operation's data is streamed through [RangeChunkStream]
+ * in fixed chunks, so the resident set stays flat no matter how large the
+ * package or its partitions are. Only REPLACE_XZ still accumulates one
+ * operation's compressed blob (bounded by [XZ_INPUT_LIMIT]) because the
+ * pure-Kotlin [XzDecoder] consumes a whole buffer; the sizes that appear in
+ * real packages stay well below the cap, and going over it is a clean
+ * [IOException] instead of the heap-death the buffered path used to hit.
  */
 object OtaPayloadExtractor {
 
@@ -37,6 +48,15 @@ object OtaPayloadExtractor {
 
     private const val END_BYTES_SIZE = 65536
     private const val LOCAL_HEADER_PROBE_SIZE = 256
+
+    /** One operation's compressed input ceiling on the buffered (XZ) path. */
+    private const val XZ_INPUT_LIMIT = 768L shl 20
+
+    /** Copy granularity between the range stream and the extent writer. */
+    private const val COPY_BUFFER = 256 shl 10
+
+    /** Chunk size of the buffered (XZ) drain loop. */
+    private const val DRAIN_CHUNK = 2 shl 20
 
     /**
      * The physical-load sources are alternatives rather than complements: the
@@ -155,6 +175,17 @@ object OtaPayloadExtractor {
                     ?: throw IOException("Partition '$name' has zero length")
 
                 withContext(Dispatchers.IO) {
+                    /* Visible to the blocking fetch bridge so a cancelled parse
+                     * stops at the next chunk instead of running the operation
+                     * to its end. */
+                    val job = coroutineContext[Job]
+                    val fetchAt: (Long, Int) -> ByteArray? = { offset, size ->
+                        if (job?.isActive == false) {
+                            throw CancellationException("payload extraction cancelled")
+                        }
+                        runBlocking { reader.read(url, dataBase + offset, size) }
+                    }
+
                     RandomAccessFile(outFile, "rw").use { raf ->
                         raf.setLength(totalSize)
 
@@ -165,51 +196,94 @@ object OtaPayloadExtractor {
                                 }
 
                                 PayloadBinUtils.OP_REPLACE -> {
-                                    val data = reader.read(
-                                        url, dataBase + op.dataOffset, op.dataLength.toInt()
-                                    ) ?: throw IOException("Failed to read REPLACE operation for $name at offset ${dataBase + op.dataOffset}")
-                                    writeExtents(raf, data, op.destExtents, blockSize)
-                                    currentDownloadedBytes += op.dataLength
-                                    reportProgress()
+                                    /* Raw bytes straight from the wire into the
+                                     * extents: no operation-sized buffer ever
+                                     * exists. */
+                                    val extents = ExtentOutputStream(raf, op.destExtents, blockSize)
+                                    RangeChunkStream(op.dataLength) { position, size ->
+                                        fetchAt(op.dataOffset + position, size)?.also { chunk ->
+                                            currentDownloadedBytes += chunk.size
+                                            reportProgress()
+                                        }
+                                    }.use { input ->
+                                        extents.use { output ->
+                                            input.copyTo(output, COPY_BUFFER)
+                                        }
+                                    }
+                                }
+
+                                PayloadBinUtils.OP_REPLACE_BZ -> {
+                                    val extents = ExtentOutputStream(raf, op.destExtents, blockSize)
+                                    RangeChunkStream(op.dataLength) { position, size ->
+                                        fetchAt(op.dataOffset + position, size)?.also { chunk ->
+                                            currentDownloadedBytes += chunk.size
+                                            reportProgress()
+                                        }
+                                    }.use { input ->
+                                        BZip2CompressorInputStream(input).use { decompressed ->
+                                            extents.use { output ->
+                                                decompressed.copyTo(output, COPY_BUFFER)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                PayloadBinUtils.OP_REPLACE_ZSTD -> {
+                                    /* The op that killed the buffered path: a
+                                     * vivo 8 GiB full package ships boot and
+                                     * vendor_boot as single ZSTD blobs whose
+                                     * decompressed size is hundreds of MiB.
+                                     * The airlift decoder streams, so the
+                                     * partition goes chunk-by-chunk onto disk
+                                     * and nothing operation-sized is resident. */
+                                    val extents = ExtentOutputStream(raf, op.destExtents, blockSize)
+                                    RangeChunkStream(op.dataLength) { position, size ->
+                                        fetchAt(op.dataOffset + position, size)?.also { chunk ->
+                                            currentDownloadedBytes += chunk.size
+                                            reportProgress()
+                                        }
+                                    }.use { input ->
+                                        ZstdInputStream(input).use { decompressed ->
+                                            extents.use { output ->
+                                                decompressed.copyTo(output, COPY_BUFFER)
+                                            }
+                                        }
+                                    }
                                 }
 
                                 PayloadBinUtils.OP_REPLACE_XZ -> {
-                                    val compressed = reader.read(
-                                        url, dataBase + op.dataOffset, op.dataLength.toInt()
-                                    ) ?: throw IOException("Failed to read REPLACE_XZ operation for $name at offset ${dataBase + op.dataOffset}")
+                                    if (op.dataLength > XZ_INPUT_LIMIT) {
+                                        throw IOException(
+                                            "REPLACE_XZ operation for $name is ${formatSize(op.dataLength)}; " +
+                                                "the buffered XZ path supports up to ${formatSize(XZ_INPUT_LIMIT)}"
+                                        )
+                                    }
                                     val uncompressedSize = op.destExtents.sumOf { it.numBlocks } * blockSize
+                                    if (uncompressedSize > Int.MAX_VALUE) {
+                                        throw IOException(
+                                            "REPLACE_XZ destination for $name (${formatSize(uncompressedSize)}) exceeds the decoder's buffer limit"
+                                        )
+                                    }
+                                    val compressed = drainRange(fetchAt, op.dataOffset, op.dataLength, name)
                                     val decompressed = XzDecoder.decode(compressed, uncompressedSize.toInt())
                                     writeExtents(raf, decompressed, op.destExtents, blockSize)
                                     currentDownloadedBytes += op.dataLength
                                     reportProgress()
                                 }
 
-                                PayloadBinUtils.OP_REPLACE_BZ -> {
-                                    val compressed = reader.read(
-                                        url, dataBase + op.dataOffset, op.dataLength.toInt()
-                                    ) ?: throw IOException("Failed to read REPLACE_BZ operation for $name at offset ${dataBase + op.dataOffset}")
-                                    val decompressed = BZip2CompressorInputStream(
-                                        ByteArrayInputStream(compressed)
-                                    ).use { it.readBytes() }
-                                    writeExtents(raf, decompressed, op.destExtents, blockSize)
-                                    currentDownloadedBytes += op.dataLength
-                                    reportProgress()
-                                }
-
-                                PayloadBinUtils.OP_REPLACE_ZSTD -> {
-                                    val compressed = reader.read(
-                                        url, dataBase + op.dataOffset, op.dataLength.toInt()
-                                    ) ?: throw IOException("Failed to read REPLACE_ZSTD operation for $name at offset ${dataBase + op.dataOffset}")
-                                    val decompressed = ZstdInputStream(
-                                        ByteArrayInputStream(compressed)
-                                    ).use { it.readBytes() }
-                                    writeExtents(raf, decompressed, op.destExtents, blockSize)
-                                    currentDownloadedBytes += op.dataLength
-                                    reportProgress()
-                                }
-
                                 else -> {
-                                    throw IOException("Unsupported payload operation type: ${op.type} in partition '$name'")
+                                    /* Differential operations (SOURCE_COPY,
+                                     * PUFFDIFF, BROTLI_BSDIFF, ZUCCHINI,
+                                     * LZ4DIFF_*) need the previous version's
+                                     * partition data, which a package link
+                                     * does not carry. Full OTA packages never
+                                     * contain them; a delta/incremental
+                                     * package must go through the full one. */
+                                    throw IOException(
+                                        "differential payload operation (type ${op.type}, ${PayloadBinUtils.opName(op.type)}) " +
+                                            "in partition '$name'; remote parsing supports full OTA packages only — " +
+                                            "use the full-package (全量包) link, or parse a local boot.img"
+                                    )
                                 }
                             }
                         }
@@ -219,13 +293,48 @@ object OtaPayloadExtractor {
             }
             reportProgress(force = true)
             return ExtractedPartitions(bootFile!!, xblConfigFile, vendorBootFile, uefiFile)
-        } catch (e: Exception) {
-            bootFile?.delete()
-            xblConfigFile?.delete()
-            vendorBootFile?.delete()
-            uefiFile?.delete()
-            throw e
+        } catch (error: CancellationException) {
+            cleanupPartial(bootFile, xblConfigFile, vendorBootFile, uefiFile)
+            throw error
+        } catch (error: Throwable) {
+            /* Cleanup must also run for Errors (OOM and friends): the temp
+             * images are half-written and useless, and leaving them behind is
+             * what used to burn storage after a crash. */
+            cleanupPartial(bootFile, xblConfigFile, vendorBootFile, uefiFile)
+            throw error
         }
+    }
+
+    /** Deletes the partially written partition images of a failed extract. */
+    private fun cleanupPartial(vararg files: File?) {
+        files.forEach { it?.delete() }
+    }
+
+    /**
+     * Reads one operation's whole compressed range into a single buffer (the
+     * XZ decoder consumes complete streams). [length] is bounded by the
+     * caller against [XZ_INPUT_LIMIT], so this is one allocation of exactly
+     * the compressed size.
+     */
+    private fun drainRange(
+        fetchAt: (Long, Int) -> ByteArray?,
+        dataOffset: Long,
+        length: Long,
+        name: String,
+    ): ByteArray {
+        val out = ByteArray(length.toInt())
+        var filled = 0L
+        while (filled < length) {
+            val want = min(DRAIN_CHUNK.toLong(), length - filled).toInt()
+            val chunk = fetchAt(dataOffset + filled, want)
+                ?: throw IOException("short read in REPLACE_XZ data for '$name' at +$filled")
+            if (chunk.isEmpty()) {
+                throw IOException("truncated REPLACE_XZ data for '$name' at +$filled")
+            }
+            System.arraycopy(chunk, 0, out, filled.toInt(), chunk.size)
+            filled += chunk.size
+        }
+        return out
     }
 
     private suspend fun locatePayloadStart(
@@ -286,6 +395,63 @@ object OtaPayloadExtractor {
                 raf.seek(extent.startBlock * blockSize)
                 raf.write(data, dataOffset, end - dataOffset)
                 dataOffset = end
+            }
+        }
+    }
+
+    /**
+     * Sequential writer over one operation's destination extents: bytes 0..n
+     * land in extent 0, the next range in extent 1, and so on, with the file
+     * position derived per extent. Producing more bytes than the extents hold
+     * is a corrupt payload and throws; producing fewer leaves the tail
+     * zero-filled (the file was pre-sized), matching the historic
+     * [writeExtents] semantics.
+     */
+    private class ExtentOutputStream(
+        private val raf: RandomAccessFile,
+        private val extents: List<PayloadBinUtils.Extent>,
+        private val blockSize: Long,
+    ) : OutputStream() {
+
+        /** Cumulative byte offset where each extent starts; last = capacity. */
+        private val boundaries = LongArray(extents.size + 1)
+        private var written = 0L
+
+        /** Extent index of [written]; writes are sequential, so it only grows. */
+        private var cursor = 0
+
+        init {
+            var acc = 0L
+            extents.forEachIndexed { index, extent ->
+                boundaries[index] = acc
+                acc += extent.numBlocks * blockSize
+            }
+            boundaries[extents.size] = acc
+        }
+
+        override fun write(byte: Int) {
+            write(byteArrayOf(byte.toByte()), 0, 1)
+        }
+
+        override fun write(buffer: ByteArray, offset: Int, length: Int) {
+            if (length <= 0) return
+            val capacity = boundaries[extents.size]
+            if (written + length > capacity) {
+                throw IOException(
+                    "operation produced ${written + length} bytes but its destination extents hold only $capacity"
+                )
+            }
+            var position = offset
+            var remaining = length
+            while (remaining > 0) {
+                while (cursor < extents.size && written >= boundaries[cursor + 1]) cursor++
+                val extentStart = boundaries[cursor]
+                val take = min(remaining.toLong(), boundaries[cursor + 1] - written).toInt()
+                raf.seek(extents[cursor].startBlock * blockSize + (written - extentStart))
+                raf.write(buffer, position, take)
+                written += take
+                position += take
+                remaining -= take
             }
         }
     }

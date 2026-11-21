@@ -149,6 +149,14 @@
     <string name="timerroot_import_config_summary">A ready-made extended symbol table - symbols plus off.* geometry</string>
     <string name="timerroot_staged_title">Loaded table</string>
     <string name="timerroot_staged_empty">No configuration loaded yet</string>
+    <string name="timerroot_tables_title">Saved tables</string>
+    <string name="timerroot_tables_subtitle">Archived symbol tables</string>
+    <string name="timerroot_tables_entry">Load a specific configuration</string>
+    <string name="timerroot_tables_entry_summary">Pick one of the archived tables from parsing or imports; auto mode matches this device\'s kernel</string>
+    <string name="timerroot_tables_empty">Nothing archived yet - parse or import a symbol table first</string>
+    <string name="timerroot_table_auto">Auto (match this device\'s kernel)</string>
+    <string name="timerroot_table_auto_summary">Load the archive matching this device\'s kernel; keep the currently loaded table when nothing matches</string>
+    <string name="timerroot_pick_failed">Failed to load the selected symbol table</string>
     <string name="timerroot_geometry_complete_badge">complete</string>
     <string name="timerroot_geometry_partial_badge">partial</string>
     <string name="timerroot_edit_no_table">Load an ic-syms configuration first</string>
@@ -157,7 +165,7 @@
     <string name="timerroot_edit_hint">Only the off.* geometry and the hard target symbol are editable; every other line is preserved verbatim on save. Values are hexadecimal (0x...).</string>
     <string name="timerroot_edit_geometry_title">Geometry and hard target</string>
     <string name="timerroot_edit_save">Save</string>
-    <string name="timerroot_edit_revert">Discard changes</string>
+    <string name="timerroot_edit_revert">Revert edits</string>
     <string name="timerroot_docs_placeholder_title">Docs in progress</string>
     <string name="timerroot_docs_placeholder_body">The field meanings and validation rules of the 98260 configuration are being written and will ship with the repository docs in a later release. See below for a quick format overview meanwhile.</string>
     <string name="timerroot_docs_format_title">Format at a glance</string>

@@ -149,6 +149,14 @@
     <string name="timerroot_import_config_summary">现成的扩展符号表 — 符号 + off.* 几何参数</string>
     <string name="timerroot_staged_title">已加载的表</string>
     <string name="timerroot_staged_empty">还没有已加载的配置</string>
+    <string name="timerroot_tables_title">已保存的表</string>
+    <string name="timerroot_tables_subtitle">存档的符号表</string>
+    <string name="timerroot_tables_entry">指定加载配置</string>
+    <string name="timerroot_tables_entry_summary">从解析或导入过的存档中选一份加载；自动模式按本机内核匹配</string>
+    <string name="timerroot_tables_empty">还没有存档 — 先解析或导入一份符号表</string>
+    <string name="timerroot_table_auto">自动（按本机内核匹配）</string>
+    <string name="timerroot_table_auto_summary">加载与本机内核一致的存档；没有匹配时保持当前已加载的表</string>
+    <string name="timerroot_pick_failed">加载所选符号表失败</string>
     <string name="timerroot_geometry_complete_badge">完整</string>
     <string name="timerroot_geometry_partial_badge">不完整</string>
     <string name="timerroot_edit_no_table">请先加载一个 ic-syms 配置</string>
@@ -157,7 +165,7 @@
     <string name="timerroot_edit_hint">仅 off.* 几何参数与硬目标符号可编辑，保存时其余行原样保留。值为十六进制（0x…）。</string>
     <string name="timerroot_edit_geometry_title">几何参数与硬目标</string>
     <string name="timerroot_edit_save">保存</string>
-    <string name="timerroot_edit_revert">放弃修改</string>
+    <string name="timerroot_edit_revert">回退编辑</string>
     <string name="timerroot_docs_placeholder_title">文档编写中</string>
     <string name="timerroot_docs_placeholder_body">98260 配置各字段的含义与校验规则正在编写，将在后续版本随仓库文档一起提供。需要提前了解格式，可先看下方简要说明。</string>
     <string name="timerroot_docs_format_title">格式速览</string>

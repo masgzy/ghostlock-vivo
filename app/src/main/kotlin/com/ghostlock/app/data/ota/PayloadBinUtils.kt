@@ -8,16 +8,41 @@ object PayloadBinUtils {
     const val PAYLOAD_ENTRY = "payload.bin"
     const val HEADER_SIZE = 24 // magic (4), version (8), manifest size (8), signature size (4)
 
+    /* InstallOperation.Type enum from update_metadata.proto (google/ota-
+     * analyzer is the authority). 2 (MOVE) is deprecated and unused. */
     const val OP_REPLACE = 0L
     const val OP_REPLACE_BZ = 1L
+    const val OP_SOURCE_COPY = 4L
     const val OP_ZERO = 6L
     const val OP_DISCARD = 7L
     const val OP_REPLACE_XZ = 8L
+    const val OP_PUFFDIFF = 9L
+    const val OP_BROTLI_BSDIFF = 10L
+    const val OP_ZUCCHINI = 11L
+    const val OP_LZ4DIFF_BSDIFF = 12L
+    const val OP_LZ4DIFF_PUFFDIFF = 13L
 
     /* Payload minor version 10: destination extents replaced with zstd-
      * compressed data. Newer full OTA packages (vivo/iQOO 2026 era) ship
      * every partition with this operation type. */
     const val OP_REPLACE_ZSTD = 14L
+
+    /** Wire name of an operation type, for error and log lines. */
+    fun opName(type: Long): String = when (type) {
+        OP_REPLACE -> "REPLACE"
+        OP_REPLACE_BZ -> "REPLACE_BZ"
+        OP_SOURCE_COPY -> "SOURCE_COPY"
+        OP_ZERO -> "ZERO"
+        OP_DISCARD -> "DISCARD"
+        OP_REPLACE_XZ -> "REPLACE_XZ"
+        OP_PUFFDIFF -> "PUFFDIFF"
+        OP_BROTLI_BSDIFF -> "BROTLI_BSDIFF"
+        OP_ZUCCHINI -> "ZUCCHINI"
+        OP_LZ4DIFF_BSDIFF -> "LZ4DIFF_BSDIFF"
+        OP_LZ4DIFF_PUFFDIFF -> "LZ4DIFF_PUFFDIFF"
+        OP_REPLACE_ZSTD -> "REPLACE_ZSTD"
+        else -> "type $type"
+    }
 
     val PAYLOAD_MAGIC = byteArrayOf('C'.code.toByte(), 'r'.code.toByte(), 'A'.code.toByte(), 'U'.code.toByte())
     private const val MAX_MANIFEST_SIZE = 64L shl 20 // 64 MiB max manifest size
