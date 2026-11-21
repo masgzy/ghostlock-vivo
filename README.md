@@ -23,7 +23,7 @@ GhostLock 的 vivo 适配 fork：在支持的 Android 内核上获取临时 root
   - W2b 每任务标签清除，标签偏移从 `vendor_boot.img` 的 `lib/modules/vr.ko` 实时探测（`--vendor-boot`）。
 - **ic-syms 符号表解析**：提取器新增 `--format ic-syms`，从 boot.img / OTA ZIP / URL 生成 t98260 需要的 66 符号表。
 - **libksud.so 手动选择**：先用内容签名（`late-load command triggered!`）自动识别，再允许在管理器 APK 的 `lib/arm64-v8a` 库列表中手动指定任意 `.so` 作为 ksud。
-- **SukiSU Nova 支持**：随机命名的 `lib<random>.so` 通过内容签名检测；内置 6.1.145（the target vivo 6.1.145 firmware）等 vivo 配置。
+- **SukiSU Nova 支持**：随机命名的 `lib<random>.so` 通过内容签名检测；内置 6.1.145（vivo 厂商固件）等配置。
 
 ## 使用
 
@@ -39,16 +39,23 @@ GhostLock 的 vivo 适配 fork：在支持的 Android 内核上获取临时 root
 
 ### TimerRoot 链（CVE-2026-98260）
 
-1. 漏洞利用链选择 **TimerRoot**，进入 **TimerRoot 配置**：
-   - **t98260 二进制**：将 [kzktor/ic-timer-lpe](https://github.com/kzktor/ic-timer-lpe) 构建的 `ic-timer` 复制为 `app/src/main/assets/t98260` 后打包，或在配置页导入；
-   - **ic-syms 符号表**：输入 boot.img / OTA ZIP 路径或 URL 解析，或导入现成表（内置偏移已覆盖的机型可跳过）。
+APK 自带 **配置驱动的 `libtimerroot.so`**（CI 从 `third_party/timerroot` 构建，内核相关数字全部来自下述配置表），不再需要手工放置二进制；也可在配置页导入预编译二进制覆盖。
+
+1. 漏洞利用链选择 **TimerRoot**（或先配置好再切换）：
+   - **98260 配置**（主页“TimerRoot 配置”进入，高级选项中“参数配置”下方也有入口）：
+     - **解析全量包 / boot.img / payload.bin / OTA 链接**——与 Ghostlock 同源的解析管线，从内核 kallsyms + BTF 生成**扩展 ic-syms 表**（符号 + `off.*` 几何参数）；
+     - **导入配置**——导入现成的扩展表（与 Ghostlock 导入 profile 同体验），或**导出**到下载分享；
+     - **导入二进制**——可选的预编译 t98260 覆盖内置库。
+   - 内置库 + 几何完整的表即可在表对应内核上**表驱动运行**；几何不完整时仅内置 profile 覆盖的内核可运行。
 2. 确保 Shizuku 已启动（该链必须运行在 shell 域读取 tracefs）。
 3. 点击 **执行**。成功后 KernelSU 模块加载并拉起管理器。
+
+扩展 ic-syms 表格式见[TimerRoot 配置说明](docs/timerroot-config.md)。
 
 ### 配置文件说明
 
 - **Ghostlock 链**使用 HOCON kernel profile（导入 / 解析 / 编辑 / 导出，见[适配指南](docs/kernel_profiles/README_ZH.md)）；
-- **TimerRoot 链**使用 ic-syms 符号表，两者界面按链切换、互不干扰。
+- **TimerRoot 链**使用扩展 ic-syms 表（符号 + 几何参数，同样支持导入 / 解析 / 导出），两者界面按链切换、互不干扰。
 - 联发科镜像地址提取见[联发科指南](docs/kernel_profiles/MEDIATEK_ZH.md)。
 
 ## 命令行工具
@@ -80,8 +87,24 @@ adb shell /data/local/tmp/ghostlock --load-prebuilt-profile /data/local/tmp/prof
 build/extract/release/ghostlock-extract boot.img --xbl-config xbl_config.img --format conf --out profile.conf
 # 附带 vendor_boot 的 vr.ko 标签偏移（写入 offset.vr_tag_a / vr_tag_b）
 build/extract/release/ghostlock-extract boot.img --vendor-boot vendor_boot.img --format conf --out profile.conf
-# TimerRoot ic-syms 符号表
+# TimerRoot ic-syms 符号表（符号 + BTF 几何参数）
 build/extract/release/ghostlock-extract OTA.zip --format ic-syms --out ic-syms.txt
+```
+
+</details>
+
+<details>
+<summary>编译 TimerRoot 核心（内置库 / 独立使用）</summary>
+
+```sh
+# 需要 Android NDK；产物为静态 PIE 可执行文件
+sh third_party/timerroot/build.sh /tmp/t98260 pd2571
+# 打包为 APK 内置库（名字即差异，安装器按 lib*.so 提取）
+sh third_party/timerroot/build.sh app/src/main/jniLibs/arm64-v8a/libtimerroot.so pd2571
+# 宿主测试（几何参数解析器）
+cc -Wall -Wextra -Ithird_party/timerroot -DIC_SYMS_HAVE_ZLIB \\
+  third_party/timerroot/tests/geo_test.c third_party/timerroot/ic_syms.c -lz -o geo_test
+./geo_test third_party/timerroot/tests/ic-syms-geo.txt
 ```
 
 </details>
@@ -89,7 +112,7 @@ build/extract/release/ghostlock-extract OTA.zip --format ic-syms --out ic-syms.t
 ## 构建
 
 ```sh
-./gradlew :app:assembleDebug      # App(可选: 把 ic-timer 产物放到 app/src/main/assets/t98260)
+./gradlew :app:assembleDebug      # App(自动构建内置 libtimerroot.so)
 (cd tools/extract_rs && cargo test --release)
 ./gradlew :app:testDebugUnitTest  # 单元测试(CI 同步执行)
 ```
@@ -99,7 +122,7 @@ CI（GitHub Actions）在每次 push / PR 时构建 APK、三平台提取器并�
 ## 参考
 
 - [Profile 结构](docs/kernel_profiles/PROFILE_SCHEMA_ZH.md)与[执行默认值](docs/kernel_profiles/defaults_ZH.md)
-- [TimerRoot + vr.ko 设计文档](docs/analysis/timerroot-vr-extract-plan.md)
+- [TimerRoot + vr.ko 设计文档](docs/analysis/timerroot-vr-extract-plan.md)、[TimerRoot 配置说明](docs/timerroot-config.md)
 - [原生核心](src/core/README_ZH.md)、[新增组件](docs/development/adding-a-component_ZH.md)、[工程规范](docs/development/engineering-standards_ZH.md)
 
 ## 贡献

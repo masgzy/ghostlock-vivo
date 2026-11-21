@@ -49,7 +49,7 @@ private const val OverwriteSummaryLimit = 12
 
 enum class DocumentRequest {
     ImportOffsetsHocon, ImportOffsetsJson, BootImage, XblImage, PayloadImage, UefiImage,
-    VendorBootImage, TimerRootBinary, TimerRootSyms,
+    VendorBootImage, TimerRootBinary, TimerRootSyms, TimerRootOtaZip, TimerRootImage,
 }
 
 /** Options offered by [promptBootAttach], in display order. VENDOR_BOOT is
@@ -93,6 +93,7 @@ class GhostlockViewModel(
         if (initialized) return
         initialized = true
         repository.setShizukuStatusListener { refreshAccessStatus() }
+        mutableState.update { it.copy(launchManagerOnSuccess = repository.launchManagerOnSuccess()) }
         viewModelScope.launch {
             refreshSnapshot()
             applyRecommendedShizuku()
@@ -937,6 +938,28 @@ class GhostlockViewModel(
     }
 
     fun onParseTimerRootSyms(input: String) {
+        onParseTimerRootSymsInternal(input)
+    }
+
+    /** 98260 配置: parse a picked local image (full OTA zip / boot.img /
+     * payload.bin) into the staged table. The extractor sniffs the container
+     * itself, so one funnel covers all three. */
+    private fun parseTimerRootInput(uri: String, cacheName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val staged = runCatching { readDocumentUseCase.cache(uri, cacheName) }
+                .onFailure {
+                    appendLog("98260 parse error: ${it.message}")
+                    send(GhostlockEffect.Toast(R.string.timerroot_parse_failed))
+                }
+                .getOrNull()
+                ?: return@launch
+            appendLog("98260 source staged: $staged")
+            onParseTimerRootSymsInternal(staged)
+        }
+    }
+
+    /** Shared by the URL dialog action and the picked-file funnel. */
+    private fun onParseTimerRootSymsInternal(input: String) {
         if (!beginOperation()) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -955,15 +978,74 @@ class GhostlockViewModel(
         }
     }
 
+    /** Shares the staged table (98260 配置) as a Download/ file. */
+    fun onExportTimerRootSyms() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.publishTimerRootSyms() }
+                .onSuccess { uri ->
+                    appendLog("ic-syms: table exported")
+                    send(GhostlockEffect.Share(uri))
+                }
+                .onFailure {
+                    appendLog("ic-syms: export failed: ${it.message}")
+                    send(GhostlockEffect.Toast(R.string.timerroot_syms_missing))
+                }
+        }
+    }
+
+    /** Drops the imported binary; the run falls back to the bundled
+     * libtimerroot.so. */
+    fun onRemoveTimerRootBinary() {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.removeTimerRootBinary()
+            appendLog("t98260 import removed; falling back to the bundled library")
+            refreshTimerRootState()
+        }
+    }
+
     private suspend fun refreshTimerRootState() {
         runCatching { repository.timerRootState() }.onSuccess { state ->
             mutableState.update {
                 it.copy(
                     timerRootBinaryAvailable = state.binaryAvailable,
                     timerRootBinarySource = state.binarySource,
+                    timerRootBinarySize = state.binarySizeBytes,
                     timerRootSymsRelease = state.symsRelease,
+                    timerRootSymsSymbols = state.symsSymbols,
+                    timerRootSymsGeometryKeys = state.symsGeometryKeys,
+                    timerRootSymsGeometryEssential = state.symsGeometryEssential,
                     ksudSelectedEntry = state.ksudEntry,
+                    timerRootAllowAnyKernel = state.allowAnyKernel,
                 )
+            }
+        }
+    }
+
+    /** IC_ALLOW_ANY_KERNEL gate for the TimerRoot chain; persisted, and the
+     * config sheet reflects it through refreshTimerRootState(). */
+    fun toggleTimerRootAllowAnyKernel(enabled: Boolean) {
+        repository.setTimerRootAllowAnyKernel(enabled)
+        mutableState.update { it.copy(timerRootAllowAnyKernel = enabled) }
+    }
+
+    /** Post-escalation convenience: auto-open the root manager when a chain
+     * finishes successfully. Both chains consult the same preference. */
+    fun toggleLaunchManagerOnSuccess(enabled: Boolean) {
+        repository.setLaunchManagerOnSuccess(enabled)
+        mutableState.update { it.copy(launchManagerOnSuccess = enabled) }
+    }
+
+    /** Best-effort follow-up after a successful run: launch the selected (or
+     * auto-resolved) root manager so the user lands on the manager screen
+     * instead of the log. Failures are logged, never fatal. */
+    private fun maybeLaunchRootManager() {
+        if (!repository.launchManagerOnSuccess()) return
+        viewModelScope.launch(Dispatchers.Main) {
+            val pkg = runCatching { repository.launchRootManager() }.getOrNull()
+            if (pkg != null) {
+                appendLog("[+] launched root manager: $pkg")
+            } else {
+                appendLog("[!] could not launch a root manager (none installed or blocked)")
             }
         }
     }
@@ -1023,6 +1105,7 @@ class GhostlockViewModel(
                 val code = runExploitUseCase(pair, useShizuku, ::appendLog)
                 appendLog(if (code == 0) "result: exploit completed" else "result: exploit failed (exit code=$code)")
                 appendLog("exit code=$code")
+                if (code == 0) maybeLaunchRootManager()
             } finally {
                 endOperation()
                 send(GhostlockEffect.KeepScreenAwake(false))
@@ -1038,14 +1121,47 @@ class GhostlockViewModel(
             onOpenTimerRootConfig()
             return
         }
+        /* Pre-flight the Shizuku gate the same way the GhostLock chain does:
+ * guide the user to start it (or grant) instead of failing inside the
+ * runner with a log-only error. */
+        val shizukuStatus = kernelSnapshot?.shizukuStatus ?: ShizukuStatus.NOT_RUNNING
+        if (shizukuStatus != ShizukuStatus.READY) {
+            when (shizukuStatus) {
+                ShizukuStatus.NOT_RUNNING -> {
+                    send(GhostlockEffect.Toast(R.string.timerroot_needs_shizuku))
+                    send(GhostlockEffect.OpenShizuku)
+                }
+                ShizukuStatus.PERMISSION_REQUIRED -> repository.requestShizukuPermission()
+                ShizukuStatus.NOT_REQUIRED, ShizukuStatus.READY -> Unit
+            }
+            return
+        }
         if (!beginOperation()) return
         send(GhostlockEffect.KeepScreenAwake(true))
         appendLog("==== start TimerRoot (CVE-2026-98260) ====")
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val code = repository.runExploitAsTimerRoot(::appendLog)
+                val logTail = StringBuilder()
+                val code = repository.runExploitAsTimerRoot { line ->
+                    logTail.append(line).append('\n')
+                    appendLog(line)
+                }
                 appendLog(if (code == 0) "result: chain completed" else "result: chain failed (exit code=$code)")
                 appendLog("exit code=$code")
+                if (code == 0) {
+                    maybeLaunchRootManager()
+                } else if (logTail.contains("does not match profile")) {
+                    /* t98260 refused to run: its built-in kernel profile does
+                     * not cover this device. The two ways out are a matching
+                     * t98260 build, or the explicit IC_ALLOW_ANY_KERNEL
+                     * override with a staged ic-syms table. */
+                    appendLog(
+                        "<t> hint: this t98260 was built for a different kernel; " +
+                            "either import a matching build, or stage a symbol table and enable " +
+                            "IC_ALLOW_ANY_KERNEL in the TimerRoot config",
+                    )
+                    onOpenTimerRootConfig()
+                }
             } finally {
                 endOperation()
                 send(GhostlockEffect.KeepScreenAwake(false))
@@ -1084,6 +1200,12 @@ class GhostlockViewModel(
 
     fun onPickTimerRootSyms() =
         send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootSyms))
+
+    fun onPickTimerRootOta() =
+        send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootOtaZip))
+
+    fun onPickTimerRootImage() =
+        send(GhostlockEffect.PickDocument(DocumentRequest.TimerRootImage))
 
     fun parseOffsets() {
         parseDialogStage = ParseDialogStage.Mode
@@ -1146,6 +1268,8 @@ class GhostlockViewModel(
             DocumentRequest.PayloadImage -> stagePayload(uri)
             DocumentRequest.TimerRootBinary -> onImportTimerRootBinary(uri)
             DocumentRequest.TimerRootSyms -> onImportTimerRootSyms(uri)
+            DocumentRequest.TimerRootOtaZip -> parseTimerRootInput(uri, "ota.zip")
+            DocumentRequest.TimerRootImage -> parseTimerRootInput(uri, "image.bin")
             DocumentRequest.ImportOffsetsHocon, DocumentRequest.ImportOffsetsJson -> Unit
         }
     }
@@ -1163,6 +1287,8 @@ class GhostlockViewModel(
             DocumentRequest.PayloadImage -> uris.firstOrNull()?.let(::stagePayload)
             DocumentRequest.TimerRootBinary -> uris.firstOrNull()?.let(::onImportTimerRootBinary)
             DocumentRequest.TimerRootSyms -> uris.firstOrNull()?.let(::onImportTimerRootSyms)
+            DocumentRequest.TimerRootOtaZip -> uris.firstOrNull()?.let { parseTimerRootInput(it, "ota.zip") }
+            DocumentRequest.TimerRootImage -> uris.firstOrNull()?.let { parseTimerRootInput(it, "image.bin") }
         }
     }
 

@@ -81,7 +81,7 @@ private fun profileDocsUrl(): String =
         "PROFILE_SCHEMA.md"
     }
 
-private fun Modifier.preferencePageItem(): Modifier =
+internal fun Modifier.preferencePageItem(): Modifier =
     this.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 12.dp)
 
 private fun Modifier.profileTreeItem(depth: Int): Modifier =
@@ -191,6 +191,26 @@ internal fun AdvancedScreen(
                         title = stringResource(R.string.parameters),
                         summary = stringResource(R.string.parameters_summary),
                         onClick = actions::onOpenParameters,
+                    )
+                }
+            }
+            /* 98260 配置: the TimerRoot chain's own profile (the extended
+             * ic-syms table + binary staging), kept below 参数配置 so both
+             * chains' configurations sit together. */
+            item(key = "timerroot-config") {
+                Card {
+                    ArrowPreference(
+                        title = stringResource(R.string.timerroot_config_entry),
+                        summary = stringResource(
+                            when {
+                                !state.timerRootBinaryAvailable ->
+                                    R.string.timerroot_config_missing_binary
+                                state.timerRootSymsRelease != null ->
+                                    R.string.timerroot_config_ready
+                                else -> R.string.timerroot_config_no_syms
+                            },
+                        ),
+                        onClick = actions::onOpenTimerRootConfig,
                     )
                 }
             }

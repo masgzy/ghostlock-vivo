@@ -295,6 +295,7 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
         ksudEntry: String?,
         symsTable: String?,
         safeMode: Boolean,
+        allowAnyKernel: Boolean,
         callback: IGhostlockCallback,
     ) {
         if (!running.compareAndSet(false, true)) {
@@ -342,6 +343,19 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                     put("TMPDIR", work.absolutePath)
                     symsFile?.let { put("IC_SYMS_FILE", it.absolutePath) }
                     ksud?.let { put("IC_KSUD", it.absolutePath) }
+                    /* IC_ALLOW_ANY_KERNEL: run an imported t98260 whose built-in
+                     * profile targets a different kernel. The staged ic-syms
+                     * table supplies this boot's slide, so the writes stay
+                     * aimed; without a table this is a blind override and the
+                     * log says so. */
+                    if (allowAnyKernel) {
+                        put("IC_ALLOW_ANY_KERNEL", "1")
+                        callback.onLog(
+                            "<t> IC_ALLOW_ANY_KERNEL=1: profile gate bypassed" +
+                                if (symsFile != null) " (slide from the staged ic-syms table)"
+                                else " (WARNING: no ic-syms table staged, the slide is guessed)",
+                        )
+                    }
                 }
                 callback.onLog("<t> launching t98260 (ksu mode)")
                 val process = ProcessBuilder(
@@ -370,9 +384,29 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
         }, "timerroot-runner").start()
     }
 
-    /** Embedded assets/t98260 first, then the user-pushed binary. */
+    /** Staging precedence, mirrored by timerRootState(): the user-pushed
+     * (imported) binary wins — an explicit choice — then the CI-built
+     * generic libtimerroot.so from the APK's jniLibs, then the legacy
+     * assets/t98260 dev asset. */
     private fun stageTimerRootBinary(work: File, callback: IGhostlockCallback): File {
         val target = File(work, "t98260")
+        val pushed = File(work, "t98260-user")
+        if (pushed.isFile && pushed.length() > 0) {
+            pushed.copyTo(target, overwrite = true)
+            target.setExecutable(true, false)
+            callback.onLog("<t> t98260: user-provided (${pushed.length()} bytes)")
+            return target
+        }
+        val library = File(context.applicationInfo.nativeLibraryDir, "libtimerroot.so")
+        if (library.isFile && library.length() > 0) {
+            library.copyTo(target, overwrite = true)
+            target.setExecutable(true, false)
+            callback.onLog(
+                "<t> t98260: bundled libtimerroot.so (${library.length()} bytes, " +
+                    "config-driven; kernel profile from the staged table)",
+            )
+            return target
+        }
         val fromAsset = runCatching {
             context.assets.open("t98260").use { input ->
                 FileOutputStream(target).use { output -> input.copyTo(output) }
@@ -384,16 +418,10 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
             callback.onLog("<t> t98260: embedded asset (${target.length()} bytes)")
             return target
         }
-        val pushed = File(work, "t98260-user")
-        if (pushed.isFile && pushed.length() > 0) {
-            pushed.copyTo(target, overwrite = true)
-            target.setExecutable(true, false)
-            callback.onLog("<t> t98260: user-provided (${pushed.length()} bytes)")
-            return target
-        }
         error(
-            "t98260 binary is missing: the APK was built without assets/t98260 and no " +
-                "user binary was imported. Import one in the TimerRoot config card first.",
+            "t98260 binary is missing: the APK bundles no libtimerroot.so, " +
+                "carries no assets/t98260 and no user binary was imported. " +
+                "Import one in the TimerRoot config screen first.",
         )
     }
 

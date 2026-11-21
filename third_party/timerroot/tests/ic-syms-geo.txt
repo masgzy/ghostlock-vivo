@@ -1,0 +1,32 @@
+# Extended ic-syms table fixture: symbols + the off.* geometry block
+# (values from the reference 6.1.145 vivo build).
+# ic-timer symbol table
+# build=6.1.145-android14-11-maybe-dirty
+__tracepoint_sys_exit=0xffffffc00a3c9ec0
+selinux_state=0xffffffc00a55a4f0
+init_user_ns=0xffffffc00a1f0f70
+init_cred=0xffffffc00a1cae08
+root_user=0xffffffc00a1f1208
+init_ucounts=0xffffffc00a1f2ab8
+init_groups=0xffffffc00a1f2528
+msleep=0xffffffc008123456
+# geometry (BTF-derived)
+off.timer_alloc=0x108
+off.cred_req=0xb8
+off.cred_alloc=0xc0
+off.task_alloc_bytes=0x1500
+off.task_cred=0x838
+off.cred_uid=0x8
+off.cap_inh=0x2c
+off.cap_perm=0x34
+off.cap_eff=0x3c
+off.cap_bset=0x44
+off.cap_amb=0x4c
+off.cred_security=0x78
+off.cred_user=0x80
+off.cred_user_ns=0x88
+off.cred_ucounts=0x90
+off.cred_group_info=0x98
+off.tp_funcs=0x40
+off.timer_node_off=0x78
+off.fullcap=0x1ffffffffff

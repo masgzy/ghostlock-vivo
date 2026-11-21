@@ -160,3 +160,43 @@ tasks.register<Copy>("prepareGhostlockExtractJniLibs") {
     into("app/src/main/jniLibs/arm64-v8a")
     rename { "libextract.so" }
 }
+
+// The vendored TimerRoot core (third_party/timerroot): built as a static PIE
+// executable named libtimerroot.so so the APK packaging extracts it; the
+// Shizuku runner stages it to /data/local/tmp and execs it. Kernel-specific
+// numbers come from the extended ic-syms table at run time.
+tasks.register<Exec>("buildTimerRootNative") {
+    description = "Build the vendored TimerRoot core (libtimerroot.so)"
+    val tools = extractNdkTools()
+    workingDir(rootProject.file("third_party/timerroot"))
+    commandLine(
+        "sh", "build.sh",
+        rootProject.file("build/native/libtimerroot.so").absolutePath,
+        "pd2571",
+    )
+    environment("CC", tools.clang)
+    environment("ANDROID_NDK_HOME", resolveNdkDir())
+    inputs.files(
+        fileTree("third_party/timerroot") { include("*.c", "*.h", "build.sh") },
+    )
+    outputs.file(file("build/native/libtimerroot.so"))
+}
+
+tasks.register<Copy>("prepareTimerRootJniLibs") {
+    description = "prepareTimerRootJniLibs"
+    dependsOn("buildTimerRootNative")
+    from("build/native/libtimerroot.so")
+    into("app/src/main/jniLibs/arm64-v8a")
+    rename { "libtimerroot.so" }
+    /* Strip only the packaged copy, mirroring prepareGhostlockJniLibs. */
+    val stripPath = File(extractNdkTools().clang)
+        .resolveSibling("llvm-strip").absolutePath
+    val packagedPath = File(rootDir, "app/src/main/jniLibs/arm64-v8a/libtimerroot.so").absolutePath
+    doLast {
+        val code = ProcessBuilder(stripPath, "--strip-all", packagedPath)
+            .inheritIO()
+            .start()
+            .waitFor()
+        check(code == 0) { "llvm-strip failed with $code" }
+    }
+}

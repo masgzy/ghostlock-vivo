@@ -6,6 +6,8 @@ on:
       - "**.md"
     branches:
       - main
+      - "feature/**"
+      - "fix/**"
   pull_request:
     branches:
       - main
@@ -52,6 +54,13 @@ jobs:
           cargo test --release --features http
           cargo build --release --features http
 
+      - name: Test TimerRoot geometry parser (host)
+        run: |
+          cc -Wall -Wextra -Ithird_party/timerroot -DIC_SYMS_HAVE_ZLIB \
+            third_party/timerroot/tests/geo_test.c third_party/timerroot/ic_syms.c \
+            -lz -o /tmp/geo_test
+          /tmp/geo_test third_party/timerroot/tests/ic-syms-geo.txt
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
@@ -83,6 +92,14 @@ jobs:
           export NDK_ROOT="$ANDROID_NDK_HOME"
           make -C src ghostlock
           "${{ runner.temp }}/ondk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-all build/native/ghostlock || true
+
+      - name: Build TimerRoot core (libtimerroot.so)
+        run: |
+          export ANDROID_NDK_HOME="${{ runner.temp }}/ondk"
+          export NDK_ROOT="$ANDROID_NDK_HOME"
+          sh third_party/timerroot/build.sh "$PWD/build/native/libtimerroot.so" pd2571
+          "${{ runner.temp }}/ondk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-all build/native/libtimerroot.so || true
+          file build/native/libtimerroot.so
 
       - name: Unit tests
         run: |
@@ -150,6 +167,13 @@ jobs:
         with:
           name: ghostlock
           path: build/native/ghostlock
+          archive: false
+
+      - name: Upload TimerRoot core
+        uses: actions/upload-artifact@v7
+        with:
+          name: libtimerroot
+          path: build/native/libtimerroot.so
           archive: false
 
       - name: Upload Extractor Linux
@@ -264,7 +288,7 @@ jobs:
           chmod +x release-files/ghostlock release-files/ghostlock-extract-* || true
 
           cd release-files
-          for f in GhostLock-release.apk ghostlock ghostlock-extract-* GhostLock-kernel-profiles.zip; do
+          for f in GhostLock-release.apk ghostlock libtimerroot.so ghostlock-extract-* GhostLock-kernel-profiles.zip; do
             if [ -f "$f" ]; then
               sha256sum "$f"
             fi
@@ -308,6 +332,7 @@ jobs:
               "#### Files",
               "- `GhostLock-release.apk`: GhostLock Android Application",
               "- `ghostlock`: Standalone GhostLock native binary (Android arm64-v8a)",
+              "- `libtimerroot.so`: TimerRoot (CVE-2026-98260) core, config-driven via the extended ic-syms table",
               "- `GhostLock-kernel-profiles.zip`: Bundled kernel profiles (HOCON)",
               "- `ghostlock-extract-android-arm64`: Kernel offset extractor CLI (Android arm64-v8a)",
               "- `ghostlock-extract-linux-x86_64`: Kernel offset extractor CLI (Linux x86_64)",
