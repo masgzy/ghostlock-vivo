@@ -9,8 +9,11 @@ import java.net.URL
 
 /**
  * Reads byte ranges of a remote file over HTTP Range requests using standard HttpURLConnection.
+ *
+ * Open with overridable [fileLength]/[read] so unit tests can serve an
+ * in-memory OTA package without a network.
  */
-class HttpRangeReader(
+open class HttpRangeReader(
     private val connectTimeoutMs: Int = 15000,
     private val readTimeoutMs: Int = 30000,
     private val userAgent: String = "Dalvik/2.1.0 (Linux; W; Android 17; Android Build/CP2A.260605.016)"
@@ -54,7 +57,7 @@ class HttpRangeReader(
         throw IOException("Too many redirects: $urlStr")
     }
 
-    suspend fun fileLength(url: String): Long? = withContext(Dispatchers.IO) {
+    open suspend fun fileLength(url: String): Long? = withContext(Dispatchers.IO) {
         return@withContext try {
             val conn = openConnectionWithRedirects(url, mapOf("Range" to "bytes=0-0"))
             try {
@@ -78,7 +81,7 @@ class HttpRangeReader(
         }
     }
 
-    suspend fun read(url: String, start: Long, size: Int): ByteArray? = withContext(Dispatchers.IO) {
+    open suspend fun read(url: String, start: Long, size: Int): ByteArray? = withContext(Dispatchers.IO) {
         if (size == 0) return@withContext ByteArray(0)
         if (size < 0 || start < 0) return@withContext null
 
