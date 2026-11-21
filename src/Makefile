@@ -23,6 +23,11 @@ CXX_SRCS := \
   core/main.cpp \
   core/attack/ops.cpp \
   core/profile/entry.cpp \
+  core/bootimg/header.cpp \
+  core/bootimg/kallsyms.cpp \
+  core/bootimg/btf.cpp \
+  core/bootimg/extract.cpp \
+  core/bootimg/physmap.cpp \
   core/memory/address_space.cpp \
   core/memory/heap_context.cpp \
   core/race/pi_race.cpp \
@@ -102,9 +107,15 @@ $(NATIVE_BUILD_DIR)/%.o: %.cpp $(HDRS)
 	@mkdir -p $(dir $@)
 	$(NDK_CXX) $(CXXFLAGS) -c $< -o $@
 
-.PHONY: cpp-link-probe-test target-constants-test native-resource-test native-host-tests host-attack-dataflow-test lint-tidy
+.PHONY: cpp-link-probe-test target-constants-test native-resource-test native-host-tests host-attack-dataflow-test lint-tidy bootimg-uefi-test bootimg-vendor-boot-test
 cpp-link-probe-test: $(HOST_BUILD_DIR)/cpp_link_probe_test
 	$(HOST_BUILD_DIR)/cpp_link_probe_test
+
+bootimg-uefi-test: $(HOST_BUILD_DIR)/bootimg_uefi_test
+	$(HOST_BUILD_DIR)/bootimg_uefi_test
+
+bootimg-vendor-boot-test: $(HOST_BUILD_DIR)/bootimg_vendor_boot_test
+	$(HOST_BUILD_DIR)/bootimg_vendor_boot_test
 
 target-constants-test: $(HOST_BUILD_DIR)/target_constants_test
 	$(HOST_BUILD_DIR)/target_constants_test
@@ -121,7 +132,8 @@ NATIVE_HOST_TESTS := \
   target_constants_test native_resource_test \
   profile_binary_test futex_hash_test number_parse_test \
   runtime_paths_test handoff_probe_test victim_context_test \
-  run_state_test address_space_test cpp_link_probe_test
+  run_state_test address_space_test cpp_link_probe_test bootimg_uefi_test \
+  bootimg_vendor_boot_test
 
 native-host-tests: $(addprefix $(HOST_BUILD_DIR)/,$(NATIVE_HOST_TESTS))
 	@status=0; for test in $^; do $$test || status=1; done; exit $$status
@@ -134,6 +146,11 @@ $(addprefix $(HOST_BUILD_DIR)/,$(NATIVE_HOST_TESTS)): $(HDRS)
 # shadow include path makes the backend resolve the host attack/ops.hpp.
 HOST_ATTACK_DATAFLOW_SOURCES := \
   core/tests/host/backend_dataflow_test.cpp \
+  core/bootimg/header.cpp \
+  core/bootimg/kallsyms.cpp \
+  core/bootimg/btf.cpp \
+  core/bootimg/extract.cpp \
+  core/bootimg/physmap.cpp \
   core/tests/host/host_attack_script.cpp \
   core/tests/host/attack_stub.cpp \
   core/tests/host/support_stub.cpp \
@@ -182,6 +199,16 @@ $(HOST_BUILD_DIR)/cpp_link_probe_test: core/tests/cpp_link_probe.cpp core/tests/
 	$(HOST_CC) -std=c11 -Icore -c core/tests/cpp_link_probe_test.c -o $(HOST_BUILD_DIR)/cpp_link_probe_test.o
 	$(HOST_CXX) $(HOST_CXXFLAGS) -Icore -c core/tests/cpp_link_probe.cpp -o $(HOST_BUILD_DIR)/cpp_link_probe.o
 	$(HOST_CXX) $(HOST_BUILD_DIR)/cpp_link_probe_test.o $(HOST_BUILD_DIR)/cpp_link_probe.o -o $@
+
+$(HOST_BUILD_DIR)/bootimg_vendor_boot_test: core/tests/bootimg_vendor_boot_test.cpp \
+    core/bootimg/physmap.cpp core/bootimg/physmap.h core/bootimg/lz4_legacy.h
+	@mkdir -p $(HOST_BUILD_DIR)
+	$(HOST_CXX) $(HOST_CXXFLAGS) -Icore core/tests/bootimg_vendor_boot_test.cpp core/bootimg/physmap.cpp -o $@
+
+$(HOST_BUILD_DIR)/bootimg_uefi_test: core/tests/bootimg_uefi_test.cpp \
+    core/bootimg/physmap.cpp core/bootimg/physmap.h
+	@mkdir -p $(HOST_BUILD_DIR)
+	$(HOST_CXX) $(HOST_CXXFLAGS) -Icore core/tests/bootimg_uefi_test.cpp core/bootimg/physmap.cpp -o $@
 
 $(HOST_BUILD_DIR)/target_constants_test: core/tests/target_constants_test.cpp core/kernel/target.h core/kernel/target_constants.hpp
 	@mkdir -p $(HOST_BUILD_DIR)
