@@ -157,9 +157,35 @@ kotlin {
     jvmToolchain(21)
 }
 
+/* Robolectric's LegacyDependencyResolver fetches the android-all SDK jar at
+ * test runtime straight from Maven Central via HttpURLConnection — no Gradle
+ * retries, no mirror, nothing the CI Gradle cache covers, so a single
+ * runner-side network hiccup fails the whole suite (BuiltinProfilesTest
+ * classMethod AssertionError <- ExecutionException <- IOException). Resolve
+ * the one jar this suite needs — every Robolectric test pins
+ * @Config(sdk = [35]) — through Gradle and hand it over via the
+ * robolectric.dependency.dir system property: that makes LegacyDependency-
+ * Resolver pick LocalDependencyResolver, which reads the jar from disk and
+ * never touches the network. When bumping Robolectric or the pinned sdk
+ * level, update the version below to match DefaultSdkProvider's mapping
+ * (android-all-instrumented "<androidVersion>-robolectric-<build>-i7"). */
+val robolectricAndroidAll = configurations.detachedConfiguration(
+    dependencies.create("org.robolectric:android-all-instrumented:15-robolectric-13954326-i7"),
+)
+val syncRobolectricAndroidAll = tasks.register<Sync>("syncRobolectricAndroidAll") {
+    description = "Stage the android-all jar for Robolectric's local dependency resolver"
+    from(robolectricAndroidAll)
+    into(layout.buildDirectory.dir("robolectric-deps"))
+}
+
 // The exporter-agreement test compares against the freshly exported .bin set.
 tasks.withType<Test>().configureEach {
     dependsOn(":profile-core:exportKernelProfiles")
+    dependsOn(syncRobolectricAndroidAll)
+    systemProperty(
+        "robolectric.dependency.dir",
+        layout.buildDirectory.dir("robolectric-deps").get().asFile.absolutePath,
+    )
 }
 
 /* sun.misc.Unsafe is @hide: absent from android.jar (compile time) but
