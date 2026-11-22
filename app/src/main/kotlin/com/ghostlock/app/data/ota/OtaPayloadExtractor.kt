@@ -1,11 +1,11 @@
 package com.ghostlock.app.data.ota
 
+import com.ghostlock.app.data.ota.zstd.ZstdInputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import io.airlift.compress.zstd.ZstdInputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.File
 import java.io.IOException
@@ -233,9 +233,14 @@ object OtaPayloadExtractor {
                                      * vivo 8 GiB full package ships boot and
                                      * vendor_boot as single ZSTD blobs whose
                                      * decompressed size is hundreds of MiB.
-                                     * The airlift decoder streams, so the
+                                     * The vendored decoder streams, so the
                                      * partition goes chunk-by-chunk onto disk
-                                     * and nothing operation-sized is resident. */
+                                     * and nothing operation-sized is resident.
+                                     * (Vendored from aircompressor with the
+                                     * sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET
+                                     * static-field read replaced by
+                                     * Unsafe.arrayBaseOffset(byte[].class) —
+                                     * see data/ota/zstd/.) */
                                     val extents = ExtentOutputStream(raf, op.destExtents, blockSize)
                                     RangeChunkStream(op.dataLength) { position, size ->
                                         fetchAt(op.dataOffset + position, size)?.also { chunk ->

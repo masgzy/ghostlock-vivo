@@ -8,6 +8,7 @@ import com.ghostlock.app.data.NativeProfileDocument
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 @Keep
@@ -330,6 +331,15 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 handoff.writeText(timerRootHandoffScript(work.absolutePath, safeMode))
                 handoff.setExecutable(true, false)
 
+                /* Preflight: a vendored core answers `t98260 info` with an
+                 * [info] banner before anything touches the kernel. An
+                 * imported binary that stays silent here is not a
+                 * compatible build (upstream release, stale artifact,
+                 * renamed file): running it used to exit 0 within
+                 * milliseconds having done nothing, which the app then
+                 * misreported as "chain completed". */
+                preflightTimerRoot(work, exploit, symsFile, allowAnyKernel, callback)
+
                 val log = File(work, "ic.log")
                 log.delete()
                 val env = buildMap<String, String> {
@@ -339,6 +349,14 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                     put("IC_DISCOVER_ATTEMPTS", "16")
                     put("IC_DISCOVER_WAIT_MS", "1000")
                     put("IC_EXEC_PAYLOAD", "1")
+                    /* The ksu-mode root child execs PAYLOAD_CMD via
+                     * /system/bin/sh -c once the fake cred lands
+                     * (timer98260.c wait_child_main). Without this variable
+                     * it falls back to the hardcoded
+                     * /data/local/tmp/ksu_stage.sh, which nothing writes:
+                     * the escalation could succeed while nothing was ever
+                     * installed. */
+                    put("PAYLOAD_CMD", "sh '${handoff.absolutePath}'")
                     put("HOME", work.absolutePath)
                     put("TMPDIR", work.absolutePath)
                     symsFile?.let { put("IC_SYMS_FILE", it.absolutePath) }
@@ -366,13 +384,19 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                     .redirectOutput(log)
                     .apply { environment().putAll(env) }
                     .start()
+                val relayState = RelayState()
                 val tailer = Thread({
-                    relayFile(log, callback)
+                    relayFile(log, relayState, callback)
                 }, "timerroot-tailer").apply { isDaemon = true; start() }
                 val code = process.waitFor()
-                Thread.sleep(300)
+                /* Stop the polling tailer, then drain what it may not have
+                 * relayed yet from its own offset, and surface the handoff
+                 * log the root child wrote — the ksu installation is part of
+                 * the chain result and used to be completely invisible. */
                 tailer.interrupt()
                 tailer.join(1000)
+                relayNewLines(log, relayState, callback)
+                relayHandoffLog(work, callback)
                 callback.onLog("<t> t98260 exited code=$code")
                 code
             }.getOrElse { error ->
@@ -467,34 +491,14 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
     }
 
     /** Forwards a growing log file to the app without blocking the exploit. */
-    private fun relayFile(logFile: File, callback: IGhostlockCallback) {
-        var offset = 0L
-        val pending = StringBuilder()
+    private fun relayFile(
+        logFile: File,
+        state: RelayState,
+        callback: IGhostlockCallback,
+    ) {
         while (!Thread.currentThread().isInterrupted) {
             try {
-                if (logFile.isFile) {
-                    RandomAccessFile(logFile, "r").use { handle ->
-                        if (offset > handle.length()) {
-                            offset = 0
-                            pending.clear()
-                        }
-                        handle.seek(offset)
-                        while (true) {
-                            val byte = handle.read()
-                            if (byte == -1) break
-                            if (byte == '\n'.code) {
-                                val line = pending.toString()
-                                pending.clear()
-                                offset = handle.filePointer
-                                if (line.isNotEmpty()) {
-                                    runCatching { callback.onLog(line) }
-                                }
-                            } else {
-                                pending.append(byte.toChar())
-                            }
-                        }
-                    }
-                }
+                relayNewLines(logFile, state, callback)
                 Thread.sleep(150)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
@@ -508,6 +512,124 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 }
             }
         }
+    }
+
+    /** Incremental read state shared by the tailer thread and the final
+     * synchronous drain after the process exits. */
+    private class RelayState {
+        var offset = 0L
+        val pending = StringBuilder()
+    }
+
+    /** Reads the bytes of [file] past [state]'s offset and relays every
+     * complete line (t98260 prints unbuffered, newline-terminated). */
+    private fun relayNewLines(
+        file: File,
+        state: RelayState,
+        callback: IGhostlockCallback,
+    ) {
+        if (!file.isFile) return
+        try {
+            RandomAccessFile(file, "r").use { handle ->
+                if (state.offset > handle.length()) {
+                    state.offset = 0
+                    state.pending.clear()
+                }
+                handle.seek(state.offset)
+                while (true) {
+                    val byte = handle.read()
+                    if (byte == -1) break
+                    if (byte == '\n'.code) {
+                        val line = state.pending.toString()
+                        state.pending.clear()
+                        state.offset = handle.filePointer
+                        if (line.isNotEmpty()) {
+                            runCatching { callback.onLog("<k> $line") }
+                        }
+                    } else {
+                        state.pending.append(byte.toChar())
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            /* The tailer retries on the next poll; the final drain simply
+             * misses a line, which the log file keeps for the next run. */
+        }
+    }
+
+    /**
+     * Relays the handoff script's log after the run. The root child writes
+     * it from the PAYLOAD_CMD script (ksud install, late-load, daemon); it
+     * is the only record of what the KernelSU handoff actually did.
+     */
+    private fun relayHandoffLog(work: File, callback: IGhostlockCallback) {
+        val handoffLog = File(work, "ksu-load.log")
+        if (!handoffLog.isFile) return
+        runCatching {
+            handoffLog.readLines().filter { it.isNotBlank() }.forEach { line ->
+                runCatching { callback.onLog("<k> $line") }
+            }
+        }
+    }
+
+    /**
+     * `t98260 info` preflight (see timer98260.c: runs before the kernel gate,
+     * no side effects beyond reads). The vendored core answers with an
+     * `[info] build=... geom=n/16 tblbuild=...` banner; the relay makes the
+     * table/kernel match visible to the user before anything runs.
+     */
+    private fun preflightTimerRoot(
+        work: File,
+        exploit: File,
+        symsFile: File?,
+        allowAnyKernel: Boolean,
+        callback: IGhostlockCallback,
+    ) {
+        val infoLog = File(work, "ic-info.log")
+        infoLog.delete()
+        val process = ProcessBuilder(listOf(exploit.absolutePath, "info"))
+            .directory(work)
+            .redirectErrorStream(true)
+            .redirectOutput(infoLog)
+            .apply {
+                environment().apply {
+                    symsFile?.let { put("IC_SYMS_FILE", it.absolutePath) }
+                    if (allowAnyKernel) put("IC_ALLOW_ANY_KERNEL", "1")
+                }
+            }
+            .start()
+        /* A vendored core answers within a few hundred milliseconds
+         * (kallsyms read plus table load); a foreign binary may instead
+         * start an exploit attempt, so the preflight is capped and the
+         * process killed. */
+        if (!process.waitFor(3, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+        }
+        val lines = runCatching { infoLog.readLines() }.getOrDefault(emptyList())
+        lines.filter { it.isNotBlank() }.take(30).forEach { line ->
+            runCatching { callback.onLog("<k> $line") }
+        }
+        val banner = lines.firstOrNull { it.contains("[info] build=") }
+        if (banner == null) {
+            error(
+                "t98260 info preflight failed: the staged binary produced no " +
+                    "[info] banner — it is not a compatible t98260 core build " +
+                    "(imported upstream release or stale artifact). Import a " +
+                    "build of this repository's third_party/timerroot, or use " +
+                    "the bundled libtimerroot.so."
+            )
+        }
+        /* A short geometry warning now beats a refused table-driven run
+         * later: the kernel gate needs all 16 essential keys. */
+        Regex("geom=(\\d+)/").find(banner)?.groupValues?.get(1)?.toIntOrNull()
+            ?.let { essential ->
+                if (essential < 16) {
+                    callback.onLog(
+                        "<t> warning: staged table geometry incomplete " +
+                            "($essential/16) — re-parse this kernel's boot image"
+                    )
+                }
+            }
     }
 
     /**

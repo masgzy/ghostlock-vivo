@@ -162,6 +162,24 @@ tasks.withType<Test>().configureEach {
     dependsOn(":profile-core:exportKernelProfiles")
 }
 
+/* sun.misc.Unsafe is @hide: absent from android.jar (compile time) but
+ * present on every ART runtime (core-oj). The vendored zstd decoder under
+ * src/main/java/.../data/ota/zstd links against it, so javac gets this
+ * compile-only stub — standard signatures, never packaged, never executed;
+ * at runtime the platform class resolves. */
+val compileUnsafeStub = tasks.register<JavaCompile>("compileUnsafeStub") {
+    source = fileTree(layout.projectDirectory.dir("src/unsafeStub/java"))
+    classpath = files()
+    destinationDirectory = layout.buildDirectory.dir("unsafeStubClasses")
+    sourceCompatibility = "8"
+    targetCompatibility = "8"
+}
+val unsafeStubJar = tasks.register<Jar>("unsafeStubJar") {
+    from(compileUnsafeStub)
+    archiveFileName = "sun-misc-unsafe-stub.jar"
+    destinationDirectory = layout.buildDirectory.dir("unsafeStubJar")
+}
+
 tasks.named("preBuild") {
     dependsOn(generateBuildInfo)
 }
@@ -180,15 +198,12 @@ tasks.matching { task ->
 }
 
 dependencies {
+    compileOnly(files(unsafeStubJar))
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.foundation:foundation:1.12.1")
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
     implementation("com.typesafe:config:1.4.9")
     implementation("org.apache.commons:commons-compress:1.28.0")
-    /* Pure-Java zstd decoder for OTA payloads that use REPLACE_ZSTD (op 14):
-     * commons-compress delegates zstd to a JNI library, which would drag a
-     * native blob into every APK, while aircompressor stays Kotlin/JVM-only. */
-    implementation("io.airlift:aircompressor:2.0.2")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("top.yukonga.miuix.kmp:miuix-ui:0.9.4")
@@ -199,4 +214,12 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.17")
+    /* Test-only zstd COMPRESSOR for fixtures: the REPLACE_ZSTD decoder the
+     * app ships is vendored under data/ota/zstd (patched aircompressor,
+     * Apache-2.0) because upstream aircompressor 2.0.x links
+     * sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET with getstatic, and newer ART
+     * builds removed that field — the remote vivo parse died with
+     * NoSuchFieldError. Tests compress with this and decode through the
+     * vendored patched decoder, the same one the device uses. */
+    testImplementation("io.airlift:aircompressor:2.0.2")
 }

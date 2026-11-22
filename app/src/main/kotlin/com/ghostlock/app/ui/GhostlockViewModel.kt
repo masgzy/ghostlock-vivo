@@ -1299,21 +1299,41 @@ class GhostlockViewModel(
                     logTail.append(line).append('\n')
                     appendLog(line)
                 }
-                appendLog(if (code == 0) "result: chain completed" else "result: chain failed (exit code=$code)")
+                /* Honest verdict: exit code 0 alone proves nothing — a foreign
+                 * or stale t98260 exits 0 within milliseconds having done
+                 * nothing. The core prints "[+] root confirmed" once the
+                 * credential switch lands and "[+] fake chain complete"
+                 * after the verified handoff (module resident, manager
+                 * started); require the marker that matches the outcome. */
+                val completed = code == 0 && logTail.contains("[+] fake chain complete")
+                val rootGained = !completed && logTail.contains("[+] root confirmed")
+                appendLog(
+                    when {
+                        completed -> "result: chain completed"
+                        rootGained -> "result: root gained; KernelSU handoff did not complete (exit code=$code)"
+                        code == 0 -> "result: chain ended without any root marker (exit code=0) — the staged t98260 did not run the chain"
+                        else -> "result: chain failed (exit code=$code)"
+                    }
+                )
                 appendLog("exit code=$code")
-                if (code == 0) {
-                    maybeLaunchRootManager()
-                } else if (logTail.contains("does not match profile")) {
-                    /* t98260 refused to run: its built-in kernel profile does
-                     * not cover this device. The two ways out are a matching
-                     * t98260 build, or the explicit IC_ALLOW_ANY_KERNEL
-                     * override with a staged ic-syms table. */
-                    appendLog(
-                        "<t> hint: this t98260 was built for a different kernel; " +
-                            "either import a matching build, or stage a symbol table and enable " +
-                            "IC_ALLOW_ANY_KERNEL in the TimerRoot config",
+                when {
+                    completed -> maybeLaunchRootManager()
+                    rootGained -> appendLog(
+                        "<t> hint: the escalation landed but the ksud late-load or the module wait failed; " +
+                            "the <k> ksu-load lines above say where"
                     )
-                    onOpenTimerRootConfig()
+                    logTail.contains("does not match profile") -> {
+                        /* t98260 refused to run: its built-in kernel profile does
+                         * not cover this device. The two ways out are a matching
+                         * t98260 build, or the explicit IC_ALLOW_ANY_KERNEL
+                         * override with a staged ic-syms table. */
+                        appendLog(
+                            "<t> hint: this t98260 was built for a different kernel; " +
+                                "either import a matching build, or stage a symbol table and enable " +
+                                "IC_ALLOW_ANY_KERNEL in the TimerRoot config",
+                        )
+                        onOpenTimerRootConfig()
+                    }
                 }
             } finally {
                 endOperation()

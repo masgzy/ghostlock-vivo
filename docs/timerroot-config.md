@@ -70,6 +70,28 @@ off.cred_req=0xb8
 二进制来源优先级（`GhostlockUserService.stageTimerRootBinary`）：
 导入的二进制 > 内置 `libtimerroot.so` > 遗留 `assets/t98260`（开发用）。
 
+## 运行链契约（app 侧 runner）
+
+`GhostlockUserService.runTimerRoot` 与 `timer98260.c` 的 ksu 模式之间：
+
+1. **预检**：正式运行前先执行 `t98260 info`（3 秒超时，杀超时进程），
+   要求输出含 `[info] build=` 横幅。导入的非本仓库构建（上游原版、旧
+   构件、改名文件）对任意子命令可能静默退出 0 —— 2026-11 的实机反馈
+   就是这种情况：进程毫秒级退出、无任何输出，app 旧逻辑按 exit code
+   误报 "chain completed"。预检横幅同时把 `geom=n/16` 与 `tblbuild=`
+   呈现给用户；几何不全（<16）时提前警告。
+2. **交接**：ksu 模式的 root 子进程执行 `PAYLOAD_CMD`（经
+   `sh -c`，见 `wait_child_main`）。runner 必须设置
+   `PAYLOAD_CMD=sh <work>/ghostlock-ksu.sh` —— 缺失时 C 侧回落到不
+   存在的 `/data/local/tmp/ksu_stage.sh`，提权成功也不会安装任何东西。
+3. **判定**：成功以输出标记为准，不以 exit code 为准：
+   `[+] root confirmed`（凭据落地）→ `[+] fake chain complete`（模块
+   驻留 + 管理器启动，即完整链）。仅 exit code=0 而无标记视为
+   "chain ended without any root marker"。
+4. **可观测性**：t98260 的 stdout/stderr 经 `ic.log` 增量转发（前缀
+   `<k>`），进程退出后同步 drain 一次并转发交接脚本写的
+   `ksu-load.log`（ksud 安装 / late-load / daemon 的唯一记录）。
+
 ## 契约同步
 
 必需键集合在三处保持镜像，改动时必须同步：
