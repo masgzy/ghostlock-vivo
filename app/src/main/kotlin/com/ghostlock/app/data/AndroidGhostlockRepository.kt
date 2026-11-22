@@ -372,6 +372,12 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
     override suspend fun removeTimerRootBinary() {
         withContext(Dispatchers.IO) {
             File(filesDir, TIMER_ROOT_BINARY).delete()
+            /* The shell-side copy outlives the app-side import: staging
+             * prefers it, so it must die too or a long-removed import keeps
+             * winning every run while the config screen says "bundled".
+             * Best effort (needs a live Shizuku); every run without a local
+             * import reconciles the same way. */
+            runCatching { shizukuRunner.clearTimerRootBinary { } }
         }
     }
 

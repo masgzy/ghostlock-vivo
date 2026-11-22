@@ -70,6 +70,14 @@ off.cred_req=0xb8
 二进制来源优先级（`GhostlockUserService.stageTimerRootBinary`）：
 导入的二进制 > 内置 `libtimerroot.so` > 遗留 `assets/t98260`（开发用）。
 
+导入的二进制在 App 侧存 `filesDir/t98260.bin`，每次运行分块推送到
+shell 侧 `/data/local/tmp/ghostlock-app/t98260-user`。**两侧同步**：
+移除导入（`removeTimerRootBinary`）与每次无导入的运行都会先调用
+`clearTimerRootBinary` 清掉 shell 侧副本 —— 否则它比 App 侧文件活得久，
+而暂存优先级又高于内置库，会出现"配置页显示内置、实际一直在跑早已
+移除的旧导入"（2026-11 实机反馈即此：2.4 MB 残留文件压过 995 KB
+内置库，秒退 exit 0）。
+
 ## 运行链契约（app 侧 runner）
 
 `GhostlockUserService.runTimerRoot` 与 `timer98260.c` 的 ksu 模式之间：

@@ -291,6 +291,22 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
         }
     }
 
+    /**
+     * Drops the shell-side imported binary. The pushed t98260-user used to
+     * outlive the app-side import it came from (removeTimerRootBinary only
+     * deletes filesDir/t98260.bin), and since staging prefers it over the
+     * bundled library, a long-removed import kept silently winning every
+     * run while the config screen said "bundled". The staged t98260 of the
+     * last run goes too; the next run re-stages from whatever is current.
+     */
+    override fun clearTimerRootBinary() {
+        runCatching {
+            val work = timerRootWorkDir()
+            File(work, "t98260-user").delete()
+            File(work, "t98260").delete()
+        }
+    }
+
     override fun runTimerRoot(
         managerApk: String?,
         ksudEntry: String?,
