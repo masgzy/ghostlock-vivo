@@ -10,7 +10,7 @@ import java.io.InputStream
 object ManagerScanner {
     const val PREF_KEY = "manager_package"
 
-    /** Built-in KernelSU-family managers, priority order. */
+    /** Built-in KernelSU-family, APatch and FolkPatch managers, priority order. */
     val BUILTIN = listOf(
         "me.weishu.kernelsu.pr",
         "me.weishu.kernelsu",
@@ -21,6 +21,9 @@ object ManagerScanner {
         "com.resukisu.resukisu",
         "org.bakasu.bakasu",
         "com.kowx712.supermanager",
+        "me.bmax.apatch",
+        "folk.zakodan",
+        "me.yuki.folk",
     )
 
     /**
@@ -45,6 +48,34 @@ object ManagerScanner {
      * daemon), but not this sentence.
      */
     private val KSUD_SIGNATURE = "late-load command triggered!".toByteArray(Charsets.UTF_8)
+
+    /** Daemon libraries packaged by supported managers, checked in order. */
+    private val DAEMON_LIBS = listOf("libksud.so", "libapd.so")
+
+    /** First supported manager daemon binary in [nativeLibDir], name-based. */
+    fun findDaemonBinary(nativeLibDir: String?): File? =
+        nativeLibDir?.takeIf { it.isNotBlank() }?.let { dir ->
+            DAEMON_LIBS.firstNotNullOfOrNull { File(dir, it).takeIf(File::isFile) }
+        }
+
+    /** Daemon binary for one package: name-based first, content scan for the
+     * name-randomized managers. `null` when the package ships none. */
+    fun findDaemonBinaryForPackage(packageName: String, nativeLibDir: String?): File? {
+        findDaemonBinary(nativeLibDir)?.let { return it }
+        if (nativeLibDir == null || packageName !in CONTENT_SCANNED) return null
+        return findKsudByContent(File(nativeLibDir))
+    }
+
+    /** First manager daemon binary in [resolvePackages] order, or null. */
+    fun resolveDaemonBinary(pm: PackageManager, chosen: String?): File? =
+        resolvePackages(chosen).firstNotNullOfOrNull { pkg ->
+            runCatching { pm.getApplicationInfo(pkg, 0).nativeLibraryDir }.getOrNull()
+                ?.let { dir -> findDaemonBinaryForPackage(pkg, dir) }
+        }
+
+    /** True when [binary] is APatch's apd daemon (`libapd.so` / `apd`). */
+    fun isApatch(binary: File?): Boolean =
+        binary?.name == "libapd.so" || binary?.name == "apd"
 
     data class Candidate(
         val packageName: String,
@@ -77,19 +108,13 @@ object ManagerScanner {
             .toList()
 
     /**
-     * A manager provides ksud when `libksud.so` exists under its native
-     * library dir, or — for the name-randomized managers — when one of the
-     * packaged `.so` files carries the ksud content signature.
+     * A manager provides a daemon when `libksud.so` / `libapd.so` exists
+     * under its native library dir, or — for the name-randomized managers —
+     * when one of the packaged `.so` files carries the ksud signature.
      */
-    fun hasKsud(packageName: String, nativeLibraryDir: String?): Boolean {
-        if (nativeLibraryDir == null) return false
-        if (File(nativeLibraryDir, "libksud.so").isFile) return true
-        if (packageName !in CONTENT_SCANNED) return false
-        return findKsudByContent(File(nativeLibraryDir)) != null
-    }
-
-    /**
-     * Locates the ksud binary inside a native library dir whose packaged
+    fun hasKsud(packageName: String, nativeLibraryDir: String?): Boolean =
+        findDaemonBinaryForPackage(packageName, nativeLibraryDir) != null
+ inside a native library dir whose packaged
      * name is randomized (SukiSU Nova). Every `.so` is probed for the
      * family-wide late-load log signature; ksud is several MB, so reads are
      * chunked instead of loading the whole file.

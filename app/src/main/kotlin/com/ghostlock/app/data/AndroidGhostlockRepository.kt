@@ -1286,7 +1286,13 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             val binary = File(appContext.applicationInfo.nativeLibraryDir, binaryName)
             require(binary.isFile) { "missing native binary: ${binary.absolutePath}" }
             val ksud = resolveKsudPath(onLog)
-            if (ksud != null) onLog("<k> ksud ready: ${ksud.absolutePath}") else onLog("<k> warning: ksud not found")
+            val isApatch = ManagerScanner.isApatch(ksud)
+            val daemonTag = if (isApatch) "[apd]" else "[ksu]"
+            if (ksud != null) {
+                onLog("<k> ${if (isApatch) "apd" else "ksud"} ready: ${ksud.absolutePath}")
+            } else {
+                onLog("<k> warning: ksud/apd not found")
+            }
             // U01-S14: a per-run KernelSU log path so a previous run's markers
             // can never satisfy the handoff probe; passed to the native process.
             val ksuLog = File(workDir, ksuLogName(System.currentTimeMillis()))
@@ -1322,7 +1328,7 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             val nativeOffset = AtomicLong()
             val processRef = AtomicReference<Process?>(null)
             // tag root-script lines so they cannot be read as the native stages'
-            val ksuSink: (String) -> Unit = { onLog("[ksu] $it") }
+            val ksuSink: (String) -> Unit = { onLog("$daemonTag $it") }
             // status events are consumed here (persisted + ACKed); plain lines are logs
             val nativeSink: (String) -> Unit = { line ->
                 if (!handleStatusLine(line, processRef)) onLog(line)
@@ -1829,25 +1835,13 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
 
     private fun firstValidProperty(vararg keys: String): String? = keys.asSequence().firstNotNullOfOrNull { validDeviceName(systemProperty(it)) }
 
-    /** First ksud binary in resolvePackages order, or null.
-     *
-     * `libksud.so` by name first; managers that randomize the packaged
-     * library name per build (SukiSU Nova) are then probed by content
-     * signature, so a release rename cannot hide the daemon. */
-    private fun resolveKsudPath(onLog: (String) -> Unit): File? {
-        val packages = ManagerScanner.resolvePackages(selectedManagerPackage())
-        for (packageName in packages) {
-            val dir = runCatching {
-                appContext.packageManager.getApplicationInfo(packageName, 0).nativeLibraryDir
-            }.getOrNull() ?: continue
-            File(dir, "libksud.so").takeIf { it.isFile }?.let { return it }
-            if (packageName in ManagerScanner.CONTENT_SCANNED) {
-                ManagerScanner.findKsudByContent(File(dir))?.let { return it }
+    /** First manager daemon binary (libksud.so / libapd.so) in resolvePackages order, or null. */
+    private fun resolveKsudPath(onLog: (String) -> Unit): File? =
+        ManagerScanner.resolveDaemonBinary(appContext.packageManager, selectedManagerPackage())
+            ?: run {
+                onLog("<k> no manager app with libksud.so / libapd.so found")
+                null
             }
-        }
-        onLog("<k> no manager app with libksud.so found")
-        return null
-    }
 
     private suspend fun runProcess(
         builder: ProcessBuilder,
