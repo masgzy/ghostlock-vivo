@@ -1,0 +1,80 @@
+package io.github.masgzy.ghostlock.vivo.data
+
+import io.github.masgzy.ghostlock.vivo.data.ManagerScanner.Candidate
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ManagerScannerTest {
+    private fun candidate(
+        pkg: String,
+        hasKsud: Boolean = true,
+        builtin: Boolean = pkg in ManagerScanner.BUILTIN,
+        label: String = pkg,
+    ) = Candidate(pkg, label, hasKsud, builtin)
+
+    @Test
+    fun `resolvePackages keeps builtin order when nothing chosen`() {
+        assertEquals(ManagerScanner.BUILTIN, ManagerScanner.resolvePackages(null))
+        assertEquals(ManagerScanner.BUILTIN, ManagerScanner.resolvePackages(""))
+        assertEquals(ManagerScanner.BUILTIN, ManagerScanner.resolvePackages("  "))
+    }
+
+    @Test
+    fun `resolvePackages puts chosen builtin first`() {
+        assertEquals(
+            listOf(
+                "me.weishu.kernelsu",
+                "me.weishu.kernelsu.pr",
+                "com.sukisu.ultra.pr",
+                "com.sukisu.ultra",
+                "com.sukisu.nova.pr",
+                "com.sukisu.nova",
+                "com.resukisu.resukisu",
+                "org.bakasu.bakasu",
+                "com.kowx712.supermanager",
+                "me.bmax.apatch",
+                "folk.zakodan",
+                "me.yuki.folk",
+            ),
+            ManagerScanner.resolvePackages("me.weishu.kernelsu"),
+        )
+    }
+
+    @Test
+    fun `builtin list covers SukiSU Ultra, its PR build, and APatch`() {
+        assertTrue("com.sukisu.ultra" in ManagerScanner.BUILTIN)
+        assertTrue("com.sukisu.ultra.pr" in ManagerScanner.BUILTIN)
+        assertTrue("me.bmax.apatch" in ManagerScanner.BUILTIN)
+    }
+
+    @Test
+    fun `builtin list covers SukiSU Nova and its PR build`() {
+        assertTrue("com.sukisu.nova" in ManagerScanner.BUILTIN)
+        assertTrue("com.sukisu.nova.pr" in ManagerScanner.BUILTIN)
+        assertTrue("com.sukisu.nova" in ManagerScanner.CONTENT_SCANNED)
+        assertTrue("com.sukisu.nova.pr" in ManagerScanner.CONTENT_SCANNED)
+    }
+
+    @Test
+    fun `resolvePackages puts chosen custom package first`() {
+        assertEquals(
+            listOf("custom.pkg") + ManagerScanner.BUILTIN,
+            ManagerScanner.resolvePackages("custom.pkg"),
+        )
+    }
+
+    @Test
+    fun `sort puts compatible builtins first then compatible then label order`() {
+        val sorted = listOf(
+            candidate("z.app", hasKsud = false, label = "Zeta"),
+            candidate("me.weishu.kernelsu"),
+            candidate("a.app", hasKsud = false, label = "Alpha"),
+            candidate("m.app", hasKsud = true, label = "Mid"),
+        ).sortedWith(ManagerScanner.sortComparator())
+        assertEquals(
+            listOf("me.weishu.kernelsu", "m.app", "a.app", "z.app"),
+            sorted.map { it.packageName },
+        )
+    }
+}

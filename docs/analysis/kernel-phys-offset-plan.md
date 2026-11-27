@@ -102,7 +102,7 @@ Invariants:
 ## Decision record
 
 - D1: name the field `kernel_phys_offset`, alongside `kernel_phys_load`.
-  Implemented in `profile-core/src/main/kotlin/com/ghostlock/app/data/NativeProfile.kt:29`.
+  Implemented in `profile-core/src/main/kotlin/io/github/masgzy/ghostlock/vivo/data/NativeProfile.kt:29`.
 - D2: default to `P0_PHYS_OFFSET (0x80000000)`.
   Implemented in `src/core/memory/address_space.cpp:86-87`.
 - D3: the extractor later uses `iomem.rs` to infer the DRAM base and physical

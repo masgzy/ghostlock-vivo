@@ -1,0 +1,51 @@
+# TODO — Ghostlock Vivo
+
+按优先级排序；完成项移到底部归档。
+
+## 高优先
+
+- [ ] **98260 真机回归**（Shizuku 链全流程）：内置 6.1.145 表 + 用户导入表两条路径都跑一遍，确认
+  `[+] fake chain complete` 判定、APatch/FolkPatch 管理器交接（`stageKsud` 新路径）与
+  Shizuku 未就绪置灰按钮的表现。
+- [ ] **Ghostlock 链真机回归**（CVE-2026-43499）：W1→W2→W3 全链 + KSU/APatch late-load，
+  重点验证 W3 每轮 slab 清理与 leaf 探测 6 次改动的成功率变化（vivo/iQOO 设备）。
+- [ ] **CI 观察一轮**：APatch 移植改动较大（原生 + Kotlin），等 Actions 全绿后发 pre-release。
+- [ ] **REPLACE_XZ 流式化**：`XzDecoder` 目前整输入整输出驻留（768 MiB 输入上限 + 全量
+  解压缓冲），大分区（非 vivo 的 vendor_boot/system 逐块 XZ）有 OOM 风险。改用
+  commons-compress `XZCompressorInputStream` 流式路径可同时删掉 `XZ_INPUT_LIMIT` 特判。
+  （vivo 全量包实际用 ZSTD，故不阻塞。）
+
+## 中优先
+
+- [ ] **归档表删除入口**：98260「已保存的表」只能追加不能删除，长期使用会无限增长；
+  需要列表项长按删除 + 确认弹窗。
+- [ ] **`/data/local/tmp/ksud` 固定名收窄**：shell 侧 `stageKsud` 把守护进程写到固定路径，
+  并发运行或上次残留可能串台；改为 `ghostlock-ksud-<pid>` 临时名 + 运行后清理
+  （注意 root 子进程的可见性约束）。
+- [ ] **`importTimerRootTable` / `stageTimerRootTable` 并发保护**：两者都用
+  `ic-syms.txt.partial` 固定名，导入与指定加载同时进行会互相覆盖；改唯一临时名。
+- [ ] **seccomp 探针误判反馈**：W3 探针把 EPERM/ENOSYS 视为过滤未清除，但 vivo LSM 也可能
+  直接回 EPERM；把探针 errno 分类打进日志（区分 RET_ERRNO 与真实内核拒绝），便于
+  profile 调参。
+- [ ] **profile 携带 W3 每轮清理开关**：新加的每轮 slab 清理对部分机型可能反而降低复用
+  命中率（如 slab 已被 prebuilt 占住）；观察真机数据，必要时加 profile 开关。
+- [ ] **上游持续同步**：上游已改名 LSPrivilege 并继续加 profile/修复；定期
+  `git fetch upstream`，跳过 rename 提交（75bb6b3 类），其余 cherry-pick。
+
+## 低优先
+
+- [ ] **fixture 生成器脚本化**：`remote-main-6x-offsets.json` 目前靠手写脚本从 conf 生成
+  （本次补 AQUOS/A78 时用的是一次性脚本）；落成 `tools/gen_legacy_fixture.py` 固化。
+- [ ] **Telegram 发布脚本文案**：`post_telegram.sh` 里 APK 描述仍写 "GhostLock"，与新
+  应用名 Ghostlock Vivo 统一。
+- [ ] **98260 配置页与 GhostLock 配置页的布局统一**：两页间距/分组仍有细微差异。
+- [ ] **AR/ES/pt-BR 上游翻译回迁**：上游新增了三语翻译（fork 点之前），ForkPatch/
+  Ghostlock Vivo 专属字符串需要补翻。
+
+## 已完成（归档）
+
+- [x] 2026-11-27 上游同步（victim 3s 超时、APatch 支持、4 组 profile），ForkPatch 零适配确认
+- [x] 2026-11-27 包名 `io.github.masgzy.ghostlock.vivo` + 应用名 Ghostlock Vivo
+- [x] 2026-11-27 98260 无 Shizuku 置灰 + TimerRoot ksud 解析覆盖 APatch/FolkPatch
+- [x] 2026-11-27 W3 每轮 slab 清理 + leaf 探测 6 次 + 范围读取重试
+- [x] 2026-11-22 ZSTD vendored 修补、98260 假成功、CI 全绿（b2532ab）

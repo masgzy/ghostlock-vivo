@@ -88,7 +88,7 @@
 ## 决策记录
 
 - D1 字段名 `kernel_phys_offset`，与 `kernel_phys_load` 并列（已落地：
-  `profile-core/src/main/kotlin/com/ghostlock/app/data/NativeProfile.kt:29`）。
+  `profile-core/src/main/kotlin/io/github/masgzy/ghostlock/vivo/data/NativeProfile.kt:29`）。
 - D2 缺省回退 `P0_PHYS_OFFSET (0x80000000)`（已落地：
   `src/core/memory/address_space.cpp:86-87`）。
 - D3 extractor 后续由 `iomem.rs` 从 `/proc/iomem` 推导 DRAM base 与物理加载地址

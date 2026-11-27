@@ -1,7 +1,7 @@
 /*
  * Compile-only stub of the platform's @hide sun.misc.Unsafe.
  *
- * The vendored zstd decoder (app/src/main/java/com/ghostlock/app/data/ota/
+ * The vendored zstd decoder (app/src/main/java/io/github/masgzy/ghostlock/vivo/data/ota/
  * zstd) links against sun.misc.Unsafe, which exists at runtime on every
  * ART build (core-oj) but is absent from android.jar, so javac cannot see
  * it. This stub carries exactly the members the decoder uses, with the

