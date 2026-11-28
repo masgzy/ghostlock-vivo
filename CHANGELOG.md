@@ -63,6 +63,19 @@ vivo/iQOO 适配 fork of [YuKongA/ghostlock-app](https://github.com/YuKongA/ghos
   bytes_alloc)` 直方图（限定 cred 可能的尺寸区间），一次 `logf` 输出，用于区分
   「表里 `off.cred_req` 与实际不符」和「exec 根本不在窗口内」；新增 `IC_CRED_REQ` /
   `IC_CRED_ALLOC` 环境覆盖便于不改表复测。
+- **cred 签名运行时自愈（slab 合并）**：真机直方图确认根因——表里 `off.cred_req=0xb0`
+  （BTF `sizeof(struct cred)`，kernel_cap_t 4 字节对齐的正确值），但 vivo 6.1.145 的
+  `cred_jar`(0xb0, slot 0xc0) 与一个 object_size=0xb8 的已有 cache **SLAB 合并**，trace
+  的 bytes_req 报合并后 cache 的 0xb8（fork+exec 恰好 2 次），BTF 在提取期不可能知道。
+  现在 `leak_cred` 在表签名 0 命中且 hello 已到时，从同一窗口的直方图里找**唯一的
+  「恰好 2 次 + cred 尺寸区间」对**（fork 的 prepare_creds + exec 的 prepare_exec_creds
+  是该窗口内唯一 count==2 的形状），采用后原地重扫；歧义/缺失则保持表值并照旧失败。
+  宿主单测 `tests/cred_discovery_test.c` 用真机直方图全量回放（含歧义与跨 pid 用例），
+  已接入 CI。
+- **calibrate_base 对齐偏好**：同一 boot 两次校准曾给出 484 票对齐的
+  `0xffffff7f80000000` 与 62 票**未对齐**的 `0xffffff7ddcce4000`——线性映射基址在本
+  机型族 2 MiB 对齐，未对齐候选必是 (slab,pfn) 错配票，若被选中会把后续 physmap
+  写全部打偏。现在 2 MiB 对齐且票数过阈值的候选优先，弃用未对齐最高票并留日志。
 - **重复绑定导致 t98260 被删**：`ShizukuExploitRunner` 的两条链在 `onServiceConnected`
   用 `connected.compareAndSet(false,true)` 只放行首次投递。此前 Shizuku 对同一连接
   重投递时，第二条流在第一条已 stage 好二进制后执行 `clearTimerRootBinary()` 的

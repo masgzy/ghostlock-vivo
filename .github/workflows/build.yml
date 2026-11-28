@@ -61,6 +61,17 @@ jobs:
             -lz -o /tmp/geo_test
           /tmp/geo_test third_party/timerroot/tests/ic-syms-geo.txt
 
+      - name: Test TimerRoot cred-signature discovery (host)
+        run: |
+          # The test includes timer98260.c (its own main is renamed away
+          # inside the test file) and exercises the runtime cred-signature
+          # discovery against the histogram observed on PD2352C 16.2.17.0.
+          cc -Wall -Ithird_party/timerroot -DIC_SYMS_HAVE_ZLIB \
+            third_party/timerroot/tests/cred_discovery_test.c \
+            third_party/timerroot/ic_syms.c \
+            -lz -lpthread -o /tmp/cred_discovery_test
+          /tmp/cred_discovery_test
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 

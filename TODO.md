@@ -6,11 +6,17 @@
 
 - [ ] **98260 真机回归**（Shizuku 链全流程）：内置 6.1.145 表 + 用户导入表两条路径都跑一遍，确认
   `[+] fake chain complete` 判定、APatch/FolkPatch 管理器交接（`stageKsud` 新路径）与
-  Shizuku 未就绪置灰按钮的表现。11-28 真机日志（PD2352C 16.2.17.0）停在
-  `cred leak failed (R=0, task_recs=1)`：已把泄漏窗口改为等子进程 hello 再停 trace，并
-  加了 R=0 时的 `kmem_cache_alloc sizes near cred` 直方图——下一轮真机若仍 R=0，先看该
-  行：有尺寸但不是 `off.cred_req` → 用 `IC_CRED_REQ=<值>` 复测并修正 BTF `sizeof(cred)`
-  取值；一行都没有 → exec 仍不在窗口内（需把 hello 等待再放宽或排查子进程调度）。
+  Shizuku 未就绪置灰按钮的表现。11-28 第二轮真机（PD2352C 16.2.17.0）已确认：泄漏窗口
+  修复生效（hello 到达、exec 分配入窗），直方图给出根因——表 `off.cred_req=0xb0`（BTF
+  sizeof）而运行时 cred 是 `0xb8/0xc0 x2`（cred_jar SLAB 合并后报合并 cache 的
+  object_size）；已加运行时签名自愈（唯一 count==2 cred 对自动采用 + 原地重扫）。下一轮
+  真机关注：`[cred] adopting runtime signature req=0xb8` 是否出现、R 是否拿到、后续
+  selinux/fake_cred plant 阶段 `calibrate_base` 的对齐偏好是否每轮都给出
+  `0xffffff7f80000000`。
+- [ ] **cred_req 无法静态预知**：`off.cred_req` 来自 BTF `sizeof(struct cred)`，但
+  SLAB 合并使运行时 bytes_req 可能不同（PD2352C：0xb0 → 0xb8）。运行时自愈已兜底；
+  如上游/社区发现更多机型样本，考虑把 cred 尺寸区间发现也反馈进表（`off.cred_req_hint`）
+  或在文档标注该字段「尽力而为」。
 - [ ] **TimerRoot 链 `[site] ... differs from profile` 后的表校验**：运行时探测到的
   do_timer_create 调用点（如 PD2352C 16.2.17.0 的 `0x1a2c34`）与编译 profile 不同属正常，
   但当前几何块不携带 `off.timer_site_low21`/`off.copy_process_low21`，无法在运行前把
