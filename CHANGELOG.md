@@ -47,6 +47,51 @@ vivo/iQOO 适配 fork of [YuKongA/ghostlock-app](https://github.com/YuKongA/ghos
   `ManagerScannerTest` 覆盖 FolkPatch 包名。
 - 文档链接（MediaTek 取值文档、profile schema）指向本仓库。
 
+## 2026-11-28 (PD2352C 16.2.17.0 真机日志回归)
+
+针对 224a2c6 构建在 vivo PD2352C（6.1.145-android14-11-maybe-dirty，16.2.17.0.W10）上
+的 TimerRoot 日志：`[cred] attempt=0..3 R=0 hello=0 recs=0 task_recs=1 failed` →
+`cred leak failed`，随后 `another GhostLock process is already running` 与
+`Cannot run program .../t98260: No such file or directory`。
+
+- **98260 cred 泄漏窗口**（`timer98260.c leak_cred`）：fork 后原为固定 `usleep(50ms)`
+  再停 trace；在小核繁忙/调度延迟下子进程尚未 execve，exec 的 cred 分配落在窗口之外
+  （task_recs=1 说明 fork 的 task_struct 已捕获、R=0 说明 exec 的 cred 没有）。改为
+  先 `poll` 等待子进程 hello（hello 在 execve 之后写出，上限 2 s，ring 16 MiB 足够），
+  再 `trace_stop`/读 ring；hello 校验沿用原 `CHILD_HELLO`。
+- **cred 泄漏失败诊断**：R=0 时打印子进程自身 `kmem_cache_alloc` 的 `(bytes_req,
+  bytes_alloc)` 直方图（限定 cred 可能的尺寸区间），一次 `logf` 输出，用于区分
+  「表里 `off.cred_req` 与实际不符」和「exec 根本不在窗口内」；新增 `IC_CRED_REQ` /
+  `IC_CRED_ALLOC` 环境覆盖便于不改表复测。
+- **重复绑定导致 t98260 被删**：`ShizukuExploitRunner` 的两条链在 `onServiceConnected`
+  用 `connected.compareAndSet(false,true)` 只放行首次投递。此前 Shizuku 对同一连接
+  重投递时，第二条流在第一条已 stage 好二进制后执行 `clearTimerRootBinary()` 的
+  reconcile，把 `t98260` 删掉，第一条 exec 得到 ENOENT，而第二条的
+  "another GhostLock process is already running" 被当成结果。
+- **UserService 单运行所有权**：`running` 布尔改为 owner 线程 `AtomicReference`，运行
+  中拒绝重复调用，owner 线程已死的残留标记自动接管；`clearTimerRootBinary` 在有运行
+  时不再删 `t98260`；二进制 stage 改为 `t98260.staged` 临时名 + rename，目标不再经历
+  "不存在"的中间态。
+- **vendor_boot.img 自拷贝被删**：ViewModel 把用户选的镜像缓存为 `filesDir/vendor_boot.img`
+  后又调用 `stageVendorBootImage` 把它 `copyTo` 到同名文件；Kotlin `copyTo(overwrite=true)`
+  先删目标再开源文件，源=目标时直接把镜像删掉（日志随后报
+  `cannot read .../vendor_boot.img: No such file`）。新增 `copyIntoPlace`：同文件 no-op，
+  否则临时名 + rename；`stageVendorBootFile`/`stageUefiFile` 同样走它。
+- **vendor_boot 包内导出不再误删**：`dumpVendorBootFromPackage` 改为导出到
+  `vendor_boot.img.dump`、校验魔数后再替换；包内没有该分区或导出失败时保留已 stage
+  的镜像（原来直接写目标并在失败时 `delete()`）。`.staging`/`.dump` 残留纳入
+  `sweepStaleExtractionTemps` 清理。
+- **98260 交接**：handoff 脚本的 `ksud late-load` 加 `--allow-shell --package-name
+  <manager>`（SukiSU Nova ksud 支持；被官方 ksud 拒绝时自动回退纯 `--kmi`），
+  真实 exit code 单独捕获；APatch（`apd`）无 late-load，脚本直接记录并以 1 退出。
+  UserService 传 `IC_KSU_NO_LAUNCH=1` + `IC_KSU_PKG`：核心只负责等待 `kernelsu`
+  驻留，管理器拉起交回 App（原来 `am start -n me.weishu.kernelsu/.ui.MainActivity`
+  在 SukiSU Nova 设备上必然失败并把成功的提权报成 handoff incomplete）。原生侧
+  `IC_KSU_PKG` 可覆盖管理器包名，`am start` 改为解析 launcher activity，失败回退
+  `monkey`。
+- 日志修正：`[main] setsid rc=` 的 errno 只在失败时打印；Rust 提取器
+  `info: (CVE-2026-43499 primitive present (` 多出的括号。
+
 ## 2026-11-22 (b2532ab)
 
 - CI 修复：Robolectric android-all jar 改走 Gradle 解析 + 阿里云镜像，依赖传输 429

@@ -9,11 +9,33 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 @Keep
 class GhostlockUserService(private val context: Context) : IGhostlockUserService.Stub() {
-    private val running = AtomicBoolean(false)
+    /* Thread that owns the current run, or null when the service is idle.
+     * Owning is claimed from the runner thread itself, so a duplicate bind
+     * (Shizuku can redeliver onServiceConnected) is refused while a run is
+     * alive, whereas an owner whose thread has died is a leftover that must
+     * not lock the chain out until the service restarts. */
+    private val owner = AtomicReference<Thread?>()
+
+    /** Runner-thread side: claims the service for this run. */
+    private fun claimRun(onLog: (String) -> Unit, tag: String): Boolean {
+        val me = Thread.currentThread()
+        if (owner.compareAndSet(null, me)) return true
+        val current = owner.get()
+        if (current != null && current !== me && !current.isAlive) {
+            onLog("$tag note: cleared a stale run flag (owner thread gone)")
+            owner.set(null)
+            return owner.compareAndSet(null, me)
+        }
+        return false
+    }
+
+    private fun releaseRun() {
+        owner.compareAndSet(Thread.currentThread(), null)
+    }
 
     private companion object {
         const val StatusMarker = "\u001eGLK_STATUS"
@@ -43,12 +65,12 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
         callback: IGhostlockCallback,
         statusCallback: IGhostlockStatusCallback,
     ) {
-        if (!running.compareAndSet(false, true)) {
-            callback.onLog("<s> error: another GhostLock process is already running")
-            callback.onComplete(1)
-            return
-        }
         Thread({
+            if (!claimRun(callback::onLog, "<s>")) {
+                callback.onLog("<s> error: another GhostLock process is already running")
+                callback.onComplete(1)
+                return@Thread
+            }
             val exitCode = runCatching {
                 require(Process.myUid() == Process.SHELL_UID) {
                     "Shizuku UserService uid=${Process.myUid()}, expected ${Process.SHELL_UID}"
@@ -160,7 +182,7 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 runCatching { callback.onLog("<s> error: ${error.message}") }
                 1
             }
-            running.set(false)
+            releaseRun()
             runCatching { callback.onComplete(exitCode) }
         }, "ghostlock-shizuku-runner").start()
     }
@@ -258,7 +280,7 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
     }
 
     override fun destroy() {
-        if (!running.get()) kotlin.system.exitProcess(0)
+        if (owner.get() == null) kotlin.system.exitProcess(0)
     }
 
     /* ---- TimerRoot (CVE-2026-98260) chain ------------------------------
@@ -310,7 +332,11 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
         runCatching {
             val work = timerRootWorkDir()
             File(work, "t98260-user").delete()
-            File(work, "t98260").delete()
+            /* The staged t98260 is re-copied on every run, so dropping it is
+             * hygiene only. While a run owns the service it may be the binary
+             * that runner is about to exec (a duplicate bind used to delete it
+             * here and the exec failed with ENOENT); leave it alone then. */
+            if (owner.get() == null) File(work, "t98260").delete()
         }
     }
 
@@ -323,12 +349,12 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
         allowAnyKernel: Boolean,
         callback: IGhostlockCallback,
     ) {
-        if (!running.compareAndSet(false, true)) {
-            callback.onLog("<t> error: another GhostLock process is already running")
-            callback.onComplete(1)
-            return
-        }
         Thread({
+            if (!claimRun(callback::onLog, "<t>")) {
+                callback.onLog("<t> error: another GhostLock process is already running")
+                callback.onComplete(1)
+                return@Thread
+            }
             val exitCode = runCatching {
                 require(Process.myUid() == Process.SHELL_UID) {
                     "Shizuku UserService uid=${Process.myUid()}, expected ${Process.SHELL_UID}"
@@ -342,6 +368,8 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 // resolution order as the GhostLock chain (chosen manager,
                 // built-ins, content probe for name-randomized managers).
                 val ksud = stageKsud(work, managerApk, ksudEntry, managerPackage, callback)
+                val daemonIsApatch = ksud?.let { ManagerScanner.isApatch(it) } ?: false
+                val managerPkg = resolveManagerPackage(managerPackage)
 
                 // ic-syms table for builds outside the binary's built-ins.
                 var symsFile: File? = null
@@ -352,7 +380,7 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 }
 
                 val handoff = File(work, "ghostlock-ksu.sh")
-                handoff.writeText(timerRootHandoffScript(work.absolutePath, safeMode))
+                handoff.writeText(timerRootHandoffScript(work.absolutePath, safeMode, managerPkg, daemonIsApatch))
                 handoff.setExecutable(true, false)
 
                 /* Preflight: a vendored core answers `t98260 info` with an
@@ -385,6 +413,13 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                     put("TMPDIR", work.absolutePath)
                     symsFile?.let { put("IC_SYMS_FILE", it.absolutePath) }
                     ksud?.let { put("IC_KSUD", it.absolutePath) }
+                    /* The core waits for kernelsu in /proc/modules itself and
+                     * then leaves the manager launch to the app (which knows
+                     * the installed manager), instead of am-starting the
+                     * hardcoded me.weishu.kernelsu activity and failing the
+                     * handoff on a SukiSU Nova / APatch device. */
+                    put("IC_KSU_NO_LAUNCH", "1")
+                    managerPkg?.let { put("IC_KSU_PKG", it) }
                     /* IC_ALLOW_ANY_KERNEL: run an imported t98260 whose built-in
                      * profile targets a different kernel. The staged ic-syms
                      * table supplies this boot's slide, so the writes stay
@@ -427,7 +462,7 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 runCatching { callback.onLog("<t> error: ${error.message}") }
                 1
             }
-            running.set(false)
+            releaseRun()
             runCatching { callback.onComplete(exitCode) }
         }, "timerroot-runner").start()
     }
@@ -435,20 +470,23 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
     /** Staging precedence, mirrored by timerRootState(): the user-pushed
      * (imported) binary wins — an explicit choice — then the CI-built
      * generic libtimerroot.so from the APK's jniLibs, then the legacy
-     * assets/t98260 dev asset. */
+     * assets/t98260 dev asset.
+     *
+     * The copy lands on a temp name and is renamed over `t98260`, so the
+     * target never passes through a not-there state while another reader
+     * (a duplicate bind's reconcile step, the previous run's exit) looks at
+     * it. */
     private fun stageTimerRootBinary(work: File, callback: IGhostlockCallback): File {
         val target = File(work, "t98260")
         val pushed = File(work, "t98260-user")
         if (pushed.isFile && pushed.length() > 0) {
-            pushed.copyTo(target, overwrite = true)
-            target.setExecutable(true, false)
+            installExecutable(pushed, target)
             callback.onLog("<t> t98260: user-provided (${pushed.length()} bytes)")
             return target
         }
         val library = File(context.applicationInfo.nativeLibraryDir, "libtimerroot.so")
         if (library.isFile && library.length() > 0) {
-            library.copyTo(target, overwrite = true)
-            target.setExecutable(true, false)
+            installExecutable(library, target)
             callback.onLog(
                 "<t> t98260: bundled libtimerroot.so (${library.length()} bytes, " +
                     "config-driven; kernel profile from the staged table)",
@@ -456,10 +494,11 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
             return target
         }
         val fromAsset = runCatching {
+            val staged = File(work, "t98260.staged")
             context.assets.open("t98260").use { input ->
-                FileOutputStream(target).use { output -> input.copyTo(output) }
+                FileOutputStream(staged).use { output -> input.copyTo(output) }
             }
-            target.setExecutable(true, false)
+            installExecutable(staged, target)
             true
         }.getOrDefault(false)
         if (fromAsset && target.length() > 0) {
@@ -471,6 +510,36 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 "carries no assets/t98260 and no user binary was imported. " +
                 "Import one in the TimerRoot config screen first.",
         )
+    }
+
+    /** Copies [source] next to [target] and renames it into place with the
+     * executable bit set; a leftover temp is removed. */
+    private fun installExecutable(source: File, target: File) {
+        val temp = File(target.parentFile, target.name + ".staged")
+        temp.delete()
+        source.copyTo(temp, overwrite = true)
+        temp.setExecutable(true, false)
+        if (!temp.renameTo(target)) {
+            // Same-filesystem rename only fails on an exotic mount; fall back
+            // to a plain copy so the run still has a binary.
+            temp.copyTo(target, overwrite = true)
+            target.setExecutable(true, false)
+            temp.delete()
+        }
+    }
+
+    /** Package name of the manager the handoff should name for ksud: the
+     * chosen package when the app picked one and it is installed, else the
+     * first installed candidate from the usual resolution order. Null when
+     * nothing is found. */
+    private fun resolveManagerPackage(chosen: String?): String? {
+        val pm = context.packageManager
+        if (!chosen.isNullOrEmpty() && runCatching { pm.getApplicationInfo(chosen, 0) }.isSuccess) {
+            return chosen
+        }
+        return ManagerScanner.resolvePackages(null).firstOrNull { pkg ->
+            runCatching { pm.getApplicationInfo(pkg, 0) }.isSuccess
+        }
     }
 
     /** Extracts the chosen .so from the manager APK, or resolves the usual way. */
@@ -651,12 +720,21 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
 
     /**
      * The KernelSU handoff the root child executes after the escalation
-     * (IC_EXEC_PAYLOAD=1). Mirrors the reference front-end's script: install
-     * ksud to /data/adb/ksud, relax SELinux to permissive, late-load the
-     * kernelsu module for this KMI, start the daemon, then log the marker
-     * the app watches for. HOME_DIR is this service's workDir.
+     * (IC_EXEC_PAYLOAD=1, PAYLOAD_CMD). Mirrors the reference front-end's
+     * script: install ksud to /data/adb/ksud, late-load the kernelsu module
+     * for this KMI (naming the manager package, which SukiSU Nova and the
+     * other forks accept), start the daemon. The log is ksu-load.log, which
+     * [relayHandoffLog] relays after the run. HOME_DIR is this service's
+     * workDir. APatch has no late-load: its daemon is only reported, and the
+     * core's module wait then ends the run as failed rather than pretending.
      */
-    private fun timerRootHandoffScript(homeDir: String, safeMode: Boolean): String {
+    private fun timerRootHandoffScript(
+        homeDir: String,
+        safeMode: Boolean,
+        managerPackage: String?,
+        daemonIsApatch: Boolean,
+    ): String {
+        val pkg = managerPackage ?: "me.weishu.kernelsu"
         return buildString {
             append("#!/system/bin/sh\n")
             append("HOME_DIR='").append(homeDir).append("'\n")
@@ -664,7 +742,7 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
             append("KSUD=\"\$HOME_DIR/ksud\"\n")
             append("[ -x \"\$KSUD\" ] || KSUD=/data/local/tmp/ksud\n")
             append("[ -x \"\$KSUD\" ] || KSUD=/data/adb/ksud\n")
-            append("echo \"[*] uid=\$(id -u) ksud=\$KSUD\" >>\"\$LOG\"\n")
+            append("echo \"[*] uid=\$(id -u) ksud=\$KSUD pkg=$pkg\" >>\"\$LOG\"\n")
             append("chmod 644 \"\$LOG\" 2>/dev/null\n")
             append("if [ -x \"\$KSUD\" ] && [ \"\$KSUD\" != /data/adb/ksud ]; then\n")
             append("  mkdir -p /data/adb 2>/dev/null\n")
@@ -679,20 +757,43 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
                 append("echo \"[*] safe mode: disabling modules\" >>\"\$LOG\"\n")
                 append("for m in /data/adb/modules/*/; do touch \"\$m/disable\" 2>/dev/null; done\n")
             }
+            if (daemonIsApatch) {
+                append("echo '[!] apd (APatch) has no late-load; the 98260 ksu endgame needs a " +
+                    "KernelSU-family manager' >>\"\$LOG\"\n")
+                append("exit 1\n")
+            }
             append("if grep -q '^kernelsu[[:space:]]' /proc/modules 2>/dev/null; then\n")
             append("  echo \"[*] kernelsu already loaded\" >>\"\$LOG\"\n")
             append("else\n")
             append("  [ -x \"\$KSUD\" ] || { echo '[!] ksud missing' >>\"\$LOG\"; exit 1; }\n")
-            append("  \"\$KSUD\" late-load --kmi \"\$KMI\" >>\"\$LOG\" 2>&1\n")
-            append("  echo \"[*] late-load exit=\$?\" >>\"\$LOG\"\n")
+            append("  echo \"[*] late-load kmi=\$KMI allow-shell package=$pkg\" >>\"\$LOG\"\n")
+            /* --allow-shell / --package-name are SukiSU ksud flags that the
+             * KernelSU forks accept; the exit code is captured before the
+             * output file is appended so it is the real late-load status. */
+            append("  \"\$KSUD\" late-load --kmi \"\$KMI\" --allow-shell --package-name '$pkg' " +
+                ">\"\$HOME_DIR/late-load.out\" 2>&1\n")
+            append("  RC=\$?\n")
+            /* Official KernelSU ksud may not know the SukiSU-only flags; when
+             * it rejects them, retry with the plain KMI form. */
+            append("  if [ \$RC -ne 0 ] && grep -qiE 'unexpected|unrecognized|unknown (argument|option)|" +
+                "invalid (argument|option)' \"\$HOME_DIR/late-load.out\"; then\n")
+            append("    echo '[*] retrying late-load without the SukiSU-only flags' >>\"\$LOG\"\n")
+            append("    \"\$KSUD\" late-load --kmi \"\$KMI\" >\"\$HOME_DIR/late-load.out\" 2>&1; RC=\$?\n")
+            append("  fi\n")
+            append("  cat \"\$HOME_DIR/late-load.out\" >>\"\$LOG\"\n")
+            append("  echo \"[*] late-load exit=\$RC\" >>\"\$LOG\"\n")
             append("fi\n")
+            append("# late-load daemonises on its own; the core polls /proc/modules for the\n")
+            append("# module (60 s), so no wait loop is needed here.\n")
             append("if ! pgrep -f ksud >/dev/null 2>&1; then\n")
             append("  \"\$KSUD\" --daemon >>\"\$LOG\" 2>&1 &\n")
             append("  sleep 2\n")
             append("fi\n")
             append("pgrep -f ksud >/dev/null 2>&1 && echo \"[+] ksud daemon running\" >>\"\$LOG\" || \\\n")
             append("  echo '[!] ksud daemon not running' >>\"\$LOG\"\n")
-            append("echo \"[+] KernelSU module loaded\" >>\"\$LOG\"\n")
+            append("grep -q '^kernelsu[[:space:]]' /proc/modules 2>/dev/null && \\\n")
+            append("  echo \"[+] KernelSU module resident\" >>\"\$LOG\" || \\\n")
+            append("  echo '[!] kernelsu module not resident in /proc/modules' >>\"\$LOG\"\n")
         }
     }
 }

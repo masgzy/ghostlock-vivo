@@ -973,6 +973,8 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
                     name.startsWith("ghostlock-payload-") ||
                         name.startsWith("ghostlock-dump-") -> entry.deleteRecursively()
                     name == "offsets_parse.tmp" -> entry.delete()
+                    /* Interrupted staging copies of the runtime images. */
+                    name.endsWith(".staging") || name.endsWith(".dump") -> entry.delete()
                     name in keep -> Unit
                 }
             }
@@ -997,10 +999,32 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             return false
         }
         return runCatching {
-            source.copyTo(File(filesDir, VendorBootFileName), overwrite = true)
+            copyIntoPlace(source, File(filesDir, VendorBootFileName))
             onLog("vendor_boot: staged -> $VendorBootFileName (runtime vr.ko probe)")
             true
         }.getOrDefault(false)
+    }
+
+    /**
+     * Copies [source] onto [target] without ever passing through a missing
+     * target: the data lands on a temp file that is renamed into place.
+     *
+     * `File.copyTo(target, overwrite = true)` deletes the target first, which
+     * matters whenever source and target are the same file — the app's own
+     * cache already names the picked image `vendor_boot.img`, so the staging
+     * copy used to delete the image it was asked to stage (the extractor then
+     * reported "cannot read .../vendor_boot.img: No such file"). A same-file
+     * copy is a no-op here.
+     */
+    private fun copyIntoPlace(source: File, target: File) {
+        if (source.canonicalFile == target.canonicalFile) return
+        val temp = File(target.parentFile, target.name + ".staging")
+        temp.delete()
+        source.copyTo(temp, overwrite = true)
+        if (!temp.renameTo(target)) {
+            temp.copyTo(target, overwrite = true)
+            temp.delete()
+        }
     }
 
     /**
@@ -1022,7 +1046,7 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         }
         return runCatching {
             val target = File(filesDir, UefiFileName)
-            source.copyTo(target, overwrite = true)
+            copyIntoPlace(source, target)
             onLog("uefi: staged -> $UefiFileName")
             target.absolutePath
         }.getOrNull()
@@ -1051,7 +1075,13 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             head.contentEquals(byteArrayOf(0x50, 0x4B, 0x03, 0x04))
         if (!isPayload) return
 
-        val target = File(filesDir, VendorBootFileName)
+        /* Dump next to the staged name, never onto it: a package without the
+         * partition, or a dump that fails half-way, must leave an image the
+         * user staged earlier (or that a previous package provided) intact.
+         * The old path wrote straight to vendor_boot.img and deleted it on
+         * failure. */
+        val dumped = File(filesDir, "$VendorBootFileName.dump")
+        dumped.delete()
         onLog("<k> vendor_boot: extracting from the package")
         val code = runCatching {
             runProcess(
@@ -1059,7 +1089,7 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
                     listOf(
                         binary.absolutePath, input,
                         "--dump-partition", "vendor_boot",
-                        "--dump-out", target.absolutePath,
+                        "--dump-out", dumped.absolutePath,
                         "--dump-only",
                         "--work-dir", filesDir.absolutePath,
                     ),
@@ -1074,12 +1104,18 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
         }.getOrNull()
         if (code != 0) {
             /* Normal for packages without the partition; the native probe
-             * simply stays on its built-in defaults. */
+             * simply stays on its built-in defaults (or on the image already
+             * staged). */
             onLog("vendor_boot: not available from this package (exit=$code)")
-            target.delete()
+            dumped.delete()
             return
         }
-        if (!stageVendorBootFile(target, onLog)) target.delete()
+        if (stageVendorBootFile(dumped, onLog)) {
+            onLog("vendor_boot: package image replaced the staged one")
+        } else {
+            onLog("vendor_boot: package dump rejected; keeping the previously staged image")
+        }
+        dumped.delete()
     }
 
     private fun isVivoOrIqoo(): Boolean {
@@ -1095,7 +1131,7 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
 
     override fun stageVendorBootImage(sourcePath: String) {
         runCatching {
-            File(sourcePath).copyTo(File(filesDir, VendorBootFileName), overwrite = true)
+            copyIntoPlace(File(sourcePath), File(filesDir, VendorBootFileName))
         }
     }
 

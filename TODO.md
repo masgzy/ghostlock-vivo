@@ -6,9 +6,20 @@
 
 - [ ] **98260 真机回归**（Shizuku 链全流程）：内置 6.1.145 表 + 用户导入表两条路径都跑一遍，确认
   `[+] fake chain complete` 判定、APatch/FolkPatch 管理器交接（`stageKsud` 新路径）与
-  Shizuku 未就绪置灰按钮的表现。
+  Shizuku 未就绪置灰按钮的表现。11-28 真机日志（PD2352C 16.2.17.0）停在
+  `cred leak failed (R=0, task_recs=1)`：已把泄漏窗口改为等子进程 hello 再停 trace，并
+  加了 R=0 时的 `kmem_cache_alloc sizes near cred` 直方图——下一轮真机若仍 R=0，先看该
+  行：有尺寸但不是 `off.cred_req` → 用 `IC_CRED_REQ=<值>` 复测并修正 BTF `sizeof(cred)`
+  取值；一行都没有 → exec 仍不在窗口内（需把 hello 等待再放宽或排查子进程调度）。
+- [ ] **TimerRoot 链 `[site] ... differs from profile` 后的表校验**：运行时探测到的
+  do_timer_create 调用点（如 PD2352C 16.2.17.0 的 `0x1a2c34`）与编译 profile 不同属正常，
+  但当前几何块不携带 `off.timer_site_low21`/`off.copy_process_low21`，无法在运行前把
+  "表与内核是否同源"校验到调用点级别；可让 Rust 提取器（`tools/extract_rs/src/derive.rs`
+  已有 disasm 能力）把两值写进表并在 `info` 预检时对比告警。
 - [ ] **Ghostlock 链真机回归**（CVE-2026-43499）：W1→W2→W3 全链 + KSU/APatch late-load，
   重点验证 W3 每轮 slab 清理与 leaf 探测 6 次改动的成功率变化（vivo/iQOO 设备）。
+  11-28 日志里 Ghostlock 解析段 `pselect_waiter_shift derivation failed: ... -216`
+  走了 family 默认值（`pselect_waiter_shift=1`），需在真机上确认该默认值对 PD2352C 成立。
 - [ ] **CI 观察一轮**：APatch 移植改动较大（原生 + Kotlin），等 Actions 全绿后发 pre-release。
 - [ ] **REPLACE_XZ 流式化**：`XzDecoder` 目前整输入整输出驻留（768 MiB 输入上限 + 全量
   解压缓冲），大分区（非 vivo 的 vendor_boot/system 逐块 XZ）有 OOM 风险。改用
@@ -44,6 +55,8 @@
 
 ## 已完成（归档）
 
+- [x] 2026-11-28 真机日志回归：98260 cred 泄漏窗口改等 hello、重复绑定/残留运行标记/t98260
+      原子 stage、vendor_boot.img 自拷贝误删、ksud late-load 参数与管理器拉起交回 App
 - [x] 2026-11-27 上游同步（victim 3s 超时、APatch 支持、4 组 profile），ForkPatch 零适配确认
 - [x] 2026-11-27 包名 `io.github.masgzy.ghostlock.vivo` + 应用名 Ghostlock Vivo
 - [x] 2026-11-27 98260 无 Shizuku 置灰 + TimerRoot ksud 解析覆盖 APatch/FolkPatch

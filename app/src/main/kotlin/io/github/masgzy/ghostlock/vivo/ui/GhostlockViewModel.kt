@@ -1975,6 +1975,15 @@ class GhostlockViewModel(
                 pendingVendorBootPath = vbPath
                 vendorBootImported = true
                 repository.stageVendorBootImage(vbPath)
+                /* The parse reads filesDir/vendor_boot.img; make sure the
+                 * staging really left one there before saying so. */
+                if (stagedVendorBoot() == null) {
+                    vendorBootImported = false
+                    appendLog("vendor_boot error: $VendorBootFileName is not staged after the copy")
+                    appendLog("result: vendor_boot import failed")
+                    showNotice(R.string.parse_result_title, R.string.parse_failed)
+                    return@launch
+                }
                 appendLog("vendor_boot staged: vr.ko tag offsets will be parsed from it at run time")
                 send(GhostlockEffect.Toast(R.string.vivo_vendor_boot_imported))
                 /* Mid-parse: hand control back to the attachment step so xbl /

@@ -409,7 +409,7 @@ fn run(cli: &Cli) -> Result<i32> {
     let primitive = ensure_rtmutex_43499_unpatched(&boot.kernel, &rel_symbols, &sorted_offsets);
     match &primitive {
         Ok(remove_waiter) => eprintln!(
-            "info: (CVE-2026-43499 primitive present \
+            "info: CVE-2026-43499 primitive present \
              (remove_waiter@{remove_waiter:#x} still uses current)"
         ),
         Err(err) => {
