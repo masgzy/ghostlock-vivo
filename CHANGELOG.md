@@ -82,7 +82,8 @@ vivo/iQOO 适配 fork of [YuKongA/ghostlock-app](https://github.com/YuKongA/ghos
   的镜像（原来直接写目标并在失败时 `delete()`）。`.staging`/`.dump` 残留纳入
   `sweepStaleExtractionTemps` 清理。
 - **98260 交接**：handoff 脚本的 `ksud late-load` 加 `--allow-shell --package-name
-  <manager>`（SukiSU Nova ksud 支持；被官方 ksud 拒绝时自动回退纯 `--kmi`），
+  <manager>`（SukiSU Nova ksud 支持；带标志形式失败且模块未驻留时自动回退纯 `--kmi`，
+  上游因官方 ksud 不认该标志已将其移除），
   真实 exit code 单独捕获；APatch（`apd`）无 late-load，脚本直接记录并以 1 退出。
   UserService 传 `IC_KSU_NO_LAUNCH=1` + `IC_KSU_PKG`：核心只负责等待 `kernelsu`
   驻留，管理器拉起交回 App（原来 `am start -n me.weishu.kernelsu/.ui.MainActivity`

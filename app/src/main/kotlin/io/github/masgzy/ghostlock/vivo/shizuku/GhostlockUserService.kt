@@ -773,10 +773,13 @@ class GhostlockUserService(private val context: Context) : IGhostlockUserService
             append("  \"\$KSUD\" late-load --kmi \"\$KMI\" --allow-shell --package-name '$pkg' " +
                 ">\"\$HOME_DIR/late-load.out\" 2>&1\n")
             append("  RC=\$?\n")
-            /* Official KernelSU ksud may not know the SukiSU-only flags; when
-             * it rejects them, retry with the plain KMI form. */
-            append("  if [ \$RC -ne 0 ] && grep -qiE 'unexpected|unrecognized|unknown (argument|option)|" +
-                "invalid (argument|option)' \"\$HOME_DIR/late-load.out\"; then\n")
+            /* Official KernelSU ksud may not know the SukiSU-only flags (upstream
+             * dropped --allow-shell for that reason); whenever the flagged
+             * form fails, retry with the plain KMI form -- a second late-load
+             * is harmless if the module is already resident. */
+            append("  if [ \$RC -ne 0 ] && grep -q '^kernelsu[[:space:]]' /proc/modules 2>/dev/null; then\n")
+            append("    echo '[*] module already resident; keeping the flagged late-load result' >>\"\$LOG\"\n")
+            append("  elif [ \$RC -ne 0 ]; then\n")
             append("    echo '[*] retrying late-load without the SukiSU-only flags' >>\"\$LOG\"\n")
             append("    \"\$KSUD\" late-load --kmi \"\$KMI\" >\"\$HOME_DIR/late-load.out\" 2>&1; RC=\$?\n")
             append("  fi\n")
